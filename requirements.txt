@@ -26,15 +26,23 @@ psycopg2-binary>=2.9.10
 # Streamlit webapp
 streamlit>=1.45.1
 
-# AI / Deep learning (install with CUDA wheels where appropriate)
-torch>=2.7.1
-torchvision>=0.22.1
+############################################################
+# Recommended Python version: 3.11.x
+# Reason: Many scientific wheels (SciPy, scikit-image, reportlab, etc.)
+# may not yet publish builds for 3.13; using 3.13 caused the errors
+# you saw (packages capped at <3.13). Use pyenv / conda to create a
+# Python 3.11 environment for reliable installation.
+############################################################
+
+# AI / Deep learning (install CUDA wheels where appropriate)
+torch>=2.0.0  # adjust upward if your platform supports newer
+torchvision>=0.15.0
 # Optional AI segmentation / restoration extras
 cellpose>=2.2.0
 stardist>=0.8.3
 csbdeep>=0.7.4
-noise2void>=0.3.0
-tensorflow>=2.13.0
+n2v>=0.3.0  # Noise2Void library is published as 'n2v', not 'noise2void'
+tensorflow>=2.13.0  # optional; only needed for some AI methods
 
 # Reporting
 reportlab>=4.0.4
