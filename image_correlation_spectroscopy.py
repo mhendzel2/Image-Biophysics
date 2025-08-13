@@ -135,9 +135,13 @@ class ImageCorrelationSpectroscopy:
         # Calculate spatial correlation for each time point
         for tau in range(-tau_max, tau_max + 1):
             for eta in range(-eta_max, eta_max + 1):
-                
                 correlation_sum = 0
                 count = 0
+
+                # Pre-compute shifted frame
+                shifted_delta_I = np.roll(np.roll(delta_I, tau, axis=1), eta, axis=2)
+                shifted_delta_I[:, :max(0, tau), :] = 0  # Zero-pad top
+                shifted_delta_I[:, -min(0, tau):, :] = 0  # Zero-pad bottom
                 
                 for t in range(T):
                     frame = delta_I[t]
@@ -145,21 +149,8 @@ class ImageCorrelationSpectroscopy:
                     # Calculate valid region for correlation
                     y_start = max(0, -tau)
                     y_end = min(H, H - tau)
-                    x_start = max(0, -eta)
-                    x_end = min(W, W - eta)
-                    
-                    if y_start < y_end and x_start < x_end:
-                        # Calculate correlation for this shift
-                        ref_region = frame[y_start:y_end, x_start:x_end]
-                        shifted_region = frame[y_start + tau:y_end + tau, 
-                                             x_start + eta:x_end + eta]
-                        
-                        correlation_sum += np.sum(ref_region * shifted_region)
-                        count += ref_region.size
-                
-                if count > 0:
-                    correlation[tau + tau_max, eta + eta_max] = correlation_sum / count
-        
+                    correlation_sum = np.sum(frame * shifted_delta_I[t])
+                    correlation[tau + tau_max, eta + eta_max] = correlation_sum / (H * W)
         return correlation
     
     def _fit_rics_diffusion_model(self, correlation: np.ndarray, pixel_size: float,

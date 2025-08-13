@@ -23,6 +23,7 @@ def fcs_model_anomalous(tau, G0, D, w0, alpha):
 def fit_fcs_data(tau, acf, model_func=fcs_model_2d, bounds=None):
     """Fits FCS data to a given model"""
     try:
+        acf = np.nan_to_num(acf, nan=0, posinf=0, neginf=0)  # Handle potential NaNs or Infs
         # Initial guesses
         G0_guess = acf[0] if len(acf) > 0 and acf[0] > 0 else 0.1
         w0_guess = 0.2  # Typical beam waist in um
@@ -160,7 +161,7 @@ def segmented_fcs_analysis(image_data, segmentation_type='x', segment_length=128
             param_errors = np.sqrt(np.diag(covariance)) if covariance.size > 0 else np.zeros_like(params)
             
             # Store results
-            result = {
+            result  = {
                 'segment_index': i,
                 'segment_type': 'x',
                 'segment_position': start_idx * pixel_size,
@@ -213,7 +214,7 @@ def segmented_fcs_analysis(image_data, segmentation_type='x', segment_length=128
             param_errors = np.sqrt(np.diag(covariance)) if covariance.size > 0 else np.zeros_like(params)
             
             # Store results
-            result = {
+            result  = {
                 'segment_index': i,
                 'segment_type': 'y',
                 'segment_position': start_idx * pixel_size,

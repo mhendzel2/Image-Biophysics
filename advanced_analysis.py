@@ -413,14 +413,18 @@ class AdvancedAnalysisManager:
         # Initialize correlation function array
         stics_corr_func = np.zeros((max_temporal_lag + 1,
                                    2 * max_spatial_lag + 1,
-                                   2 * max_spatial_lag + 1))
+                                   2 * max_spatial_lag + 1), dtype=np.float64)
         
         for tau in range(max_temporal_lag + 1):
             if T - tau <= 0:
                 continue
             
             numerator_sum_map = np.zeros((2 * max_spatial_lag + 1, 2 * max_spatial_lag + 1))
-            denominator_sum = 0
+            intensity_product_sum_map = np.zeros((2 * max_spatial_lag + 1, 2 * max_spatial_lag + 1))
+            
+            # Pre-calculate mean for efficiency
+            mean_intensity_product = mean_intensities_t[:T-tau] * mean_intensities_t[tau:T]
+            
             
             # Sum correlations over all possible start times
             for t in range(T - tau):
@@ -446,16 +450,25 @@ class AdvancedAnalysisManager:
                                 frame1_fluctuations[y1_start:y1_end, x1_start:x1_end] *
                                 frame2_fluctuations[y2_start:y2_end, x2_start:x2_end]
                             )
-                            numerator_sum_map[eta_idx, ksi_idx] += corr_sum
-                
-                denominator_sum += mean_intensities_t[t] * mean_intensities_t[t + tau]
+                            numerator_sum_map[eta_idx, ksi_idx] += corr_sum  # Sum correlation for normalization
+                            
+                            # Calculate local intensity products for normalization
+                            intensity_product_sum_map[eta_idx, ksi_idx] += np.sum(
+                                image_series_TXY[t, y1_start:y1_end, x1_start:x1_end] * 
+                                image_series_TXY[t + tau, y2_start:y2_end, x2_start:x2_end]
+                            )
+
             
-            # Normalize
-            num_time_pairs = T - tau
-            if num_time_pairs > 0 and denominator_sum > 1e-9:
-                avg_spatial_corr = numerator_sum_map / num_time_pairs
-                avg_denominator = denominator_sum / num_time_pairs
-                stics_corr_func[tau, :, :] = avg_spatial_corr / avg_denominator
+            # Improved normalization
+            valid_pairs_count = T - tau
+            for eta_idx in range(2 * max_spatial_lag + 1):
+                for ksi_idx in range(2 * max_spatial_lag + 1):
+                    if valid_pairs_count > 0:
+                        avg_corr = numerator_sum_map[eta_idx, ksi_idx] / valid_pairs_count
+                        avg_intensity_product = intensity_product_sum_map[eta_idx, ksi_idx] / valid_pairs_count
+                        
+                        if avg_intensity_product > 1e-9: # Avoid division by zero or near-zero values
+                            stics_corr_func[tau, eta_idx, ksi_idx] = avg_corr / avg_intensity_product
         
         return stics_corr_func
     
@@ -594,7 +607,11 @@ class AdvancedAnalysisManager:
                 'parameters_used': parameters
             }
             
-        except Exception as e:
+        except ValueError as ve:
+            return {'status': 'error', 'message': f'Richardson-Lucy processing failed due to invalid values: {str(ve)}'}
+        except TypeError as te:
+            return {'status': 'error', 'message': f'Richardson-Lucy processing failed due to type mismatch: {str(te)}'}
+        except Exception as e:  # Catch-all for other potential issues
             return {'status': 'error', 'message': f'Richardson-Lucy processing failed: {str(e)}'}
     
     def _create_colored_masks(self, masks: np.ndarray) -> np.ndarray:

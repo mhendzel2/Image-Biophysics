@@ -77,10 +77,11 @@ def apply_nuclear_alignment(image_data: np.ndarray,
             return aligned_data, True, quality_metrics
         else:
             warnings.warn(f"{analysis_name}: Nuclear alignment failed - {alignment_result.get('message', 'Unknown error')}")
-            return image_data, False, {}
-            
+            return image_data, False, {}          
     except ImportError:
-        warnings.warn(f"{analysis_name}: Nuclear alignment module not available")
+        warnings.warn(
+            f"{analysis_name}: Nuclear alignment module not available. Please ensure the 'nuclear_alignment' module is installed correctly."
+        )
         return image_data, False, {}
     except Exception as e:
         warnings.warn(f"{analysis_name}: Nuclear alignment error - {str(e)}")
@@ -95,7 +96,7 @@ def _apply_shifts_to_channel(channel_data: np.ndarray, shifts: list) -> np.ndarr
     
     for t, shift in enumerate(shifts):
         if t < channel_data.shape[0]:
-            if len(shift) >= 2:
+            if shift is not None and len(shift) >= 2:
                 aligned_channel[t] = ndimage.shift(
                     channel_data[t], shift[:2], order=1, mode='nearest'
                 )

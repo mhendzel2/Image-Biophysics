@@ -42,8 +42,12 @@ except ImportError:
     TORCH_AVAILABLE = False
     warnings.warn("PyTorch not available - some AI enhancement features disabled")
 except Exception as e:
-    TORCH_AVAILABLE = False
-    warnings.warn(f"PyTorch configuration error: {e} - AI features limited")
+    if "ModuleNotFoundError" in str(e) or "No module named" in str(e):
+        TORCH_AVAILABLE = False
+        warnings.warn(f"PyTorch not available (missing modules): {e} - AI features limited")
+    else:
+        TORCH_AVAILABLE = False
+        warnings.warn(f"PyTorch configuration error: {e} - AI features limited")
 
 try:
     import tensorflow as tf
@@ -108,7 +112,7 @@ class AIEnhancementManager:
         elif method == 'Noise2Void Self-Supervised Denoising':
             return self._apply_noise2void(image_data, parameters)
         elif method == 'Cellpose Cell Segmentation':
-            return self._apply_cellpose_segmentation(image_data, parameters, model_type='cyto')
+            return self._apply_cellpose_segmentation(image_data, parameters, model_type='cyto2')
         elif method == 'Cellpose Nucleus Segmentation':
             return self._apply_cellpose_segmentation(image_data, parameters, model_type='nuclei')
         elif method == 'StarDist Nucleus Segmentation':
@@ -243,7 +247,8 @@ class AIEnhancementManager:
                     patch_size=patch_size,
                     patch_distance=patch_distance,
                     h=h * np.var(img_float),
-                    fast_mode=True
+                        fast_mode=True,
+                        channel_axis=None
                 )
             elif img_float.ndim == 3:
                 # Check if it's a time series (T, Y, X) or color image (Y, X, C)
@@ -254,7 +259,7 @@ class AIEnhancementManager:
                         patch_distance=patch_distance,
                         h=h * np.var(img_float),
                         fast_mode=True,
-                        channel_axis=2
+                        channel_axis=2 if img_float.shape[2] in [3, 4] else None  # Apply only if channel dimension is present
                     )
                 else:  # Likely time series or Z-stack
                     # Process each frame individually
@@ -278,7 +283,7 @@ class AIEnhancementManager:
                             patch_distance=patch_distance,
                             h=h * np.var(img_float[t]),
                             fast_mode=True,
-                            channel_axis=2 if img_float.shape[3] <= 4 else None
+                            channel_axis=2 if img_float.shape[3] in [3, 4] else None  # Apply only if channel dimension is present
                         )
                 else:
                     # Fallback for higher dimensions
@@ -405,7 +410,7 @@ def get_enhancement_parameters(method: str) -> Dict[str, Any]:
     if method == 'Non-local Means Denoising':
         return {
             'patch_size': 5,
-            'patch_distance': 6,
+                'patch_distance': 6,
             'fast_mode': True,
             'auto_sigma': True,
             'h': 0.1
@@ -418,7 +423,7 @@ def get_enhancement_parameters(method: str) -> Dict[str, Any]:
         }
     elif method in ['Cellpose Cell Segmentation', 'Cellpose Nucleus Segmentation']:
         return {
-            'diameter': None,
+            'diameter': 30,
             'channels': [0, 0],
             'use_gpu': False
         }

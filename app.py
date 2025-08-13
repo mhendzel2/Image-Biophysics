@@ -25,6 +25,7 @@ from database_manager import DatabaseManager, get_database_manager
 from thumbnail_generator import ThumbnailGenerator
 from report_generator import AutomatedReportGenerator
 from utils import format_file_size, validate_analysis_parameters
+import os
 
 def normalize_image_for_display(image_data):
     """Normalize image data to [0, 1] range for Streamlit display"""
@@ -49,6 +50,29 @@ def normalize_image_for_display(image_data):
     
     return ((image_data - img_min) / (img_max - img_min)).astype(np.float32)
 
+def check_installation_status():
+    """Check installation status and library availability"""
+    venv_path = Path("./venv")
+    success_marker = venv_path / "installation_success.txt"
+    config_file = venv_path / "config.txt"
+    
+    if not success_marker.exists() or not config_file.exists():
+        return {"installed": False, "message": "Incomplete installation. Please run install.sh"}
+    
+    try:
+        with open(config_file, "r") as f:
+            libraries = [line.strip() for line in f if line.strip()]
+        
+        return {"installed": True, "libraries": libraries}
+        
+    except Exception as e:
+        return {
+            "installed": False,
+            "message": f"Error reading configuration: {e}",
+            "libraries": []
+        }
+
+
 # Configure page
 st.set_page_config(
     page_title="Advanced Image Biophysics",
@@ -59,6 +83,14 @@ st.set_page_config(
 
 def main():
     """Main application interface"""
+    
+    # Check installation status on first run
+    if 'installation_status' not in st.session_state:
+        st.session_state.installation_status = check_installation_status()
+        
+        if not st.session_state.installation_status['installed']:
+            st.error(st.session_state.installation_status['message'])
+            st.stop()  # Stop execution if installation incomplete
     
     # Initialize session state
     if 'data_loader' not in st.session_state:
@@ -101,6 +133,7 @@ def main():
         st.session_state.report_generator = AutomatedReportGenerator()
     if 'file_thumbnails' not in st.session_state:
         st.session_state.file_thumbnails = {}
+
     
     # Header
     st.title("🔬 Advanced Image Biophysics")
@@ -829,7 +862,7 @@ def render_data_overview(data_info):
     with col1:
         st.subheader("Dataset Information")
         
-        info_data = {
+        dataset_info = {
             "Filename": data_info.get('filename', 'Unknown'),
             "Format": data_info.get('format', 'Unknown'),
             "Dimensions": f"{data_info.get('shape', 'Unknown')}",
@@ -843,12 +876,23 @@ def render_data_overview(data_info):
         if data_info.get('channels', 1) > 1:
             channel_names = data_info.get('channel_names', [])
             if channel_names:
-                info_data["Channel Names"] = ", ".join(channel_names)
+                dataset_info["Channel Names"] = ", ".join(channel_names)
         
-        for key, value in info_data.items():
-            st.metric(key, value)
+        # Display dataset info as a dataframe for better layout
+        dataset_df = pd.DataFrame([dataset_info])
+        st.dataframe(dataset_df.T, column_config={"0": st.column_config.Column(width="medium")}, use_container_width=True)
     
     with col2:
+        st.subheader("Data Preview")
+        
+        # Attempt to get thumbnail from session state
+        if 'filename' in data_info and data_info['filename'] in st.session_state.file_thumbnails:
+            thumbnail_data = st.session_state.file_thumbnails[data_info['filename']]
+            if thumbnail_data.get('thumbnail'):
+                st.image(thumbnail_data['thumbnail'], caption="Preview Image", use_container_width=True)
+            else:
+                st.info("No preview available for this file")
+        
         st.subheader("Acquisition Parameters")
         
         acq_params = data_info.get('acquisition_params', {})

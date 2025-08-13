@@ -199,6 +199,7 @@ class DatabaseManager:
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_analysis_results_file_id ON analysis_results(file_id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_analysis_results_type ON analysis_results(analysis_type)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_nuclear_analysis_file_id ON nuclear_analysis(file_id)")
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_nuclear_analysis_analysis_id ON nuclear_analysis(analysis_result_id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_sessions_session_id ON user_sessions(session_id)")
             cursor.execute("CREATE INDEX IF NOT EXISTS idx_queue_status ON analysis_queue(status)")
             

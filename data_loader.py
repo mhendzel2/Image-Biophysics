@@ -172,7 +172,7 @@ class DataLoader:
                             if hasattr(tif, 'imagej_metadata') and tif.imagej_metadata:
                                 if isinstance(tif.imagej_metadata, dict):
                                     base_metadata.update(tif.imagej_metadata)
-                            
+
                             pixel_size = self._extract_pixel_size(tif)
                             
                         # Store individual file metadata

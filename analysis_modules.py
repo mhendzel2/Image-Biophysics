@@ -1508,12 +1508,12 @@ class SPTAnalysis(BaseAnalysis):
             'std_trajectory_length': particle_counts.std(),
             'mean_step_size': np.mean(step_sizes) if step_sizes else 0,
             'std_step_size': np.std(step_sizes) if step_sizes else 0,
-            'mean_displacement_per_frame': np.mean(step_sizes) if step_sizes else 0,
+            'mean_step_size_per_frame': np.mean(step_sizes) if step_sizes else 0,
             'total_displacement': np.sum(step_sizes) if step_sizes else 0
         }
-        
+
         return metrics
-    
+
     def _analyze_diffusion_behavior(self, trajectories: pd.DataFrame, msd_data: pd.DataFrame,
                                   pixel_size: float, time_interval: float) -> Dict[str, Any]:
         """Analyze diffusion behavior from MSD data"""
