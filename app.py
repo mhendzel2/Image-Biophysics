@@ -25,6 +25,7 @@ from database_manager import DatabaseManager, get_database_manager
 from thumbnail_generator import ThumbnailGenerator
 from report_generator import AutomatedReportGenerator
 from utils import format_file_size, validate_analysis_parameters
+from segmented_fcs import SegmentedFCSAnalyzer, get_segmented_fcs_parameters
 import os
 
 def normalize_image_for_display(image_data):
@@ -133,6 +134,8 @@ def main():
         st.session_state.report_generator = AutomatedReportGenerator()
     if 'file_thumbnails' not in st.session_state:
         st.session_state.file_thumbnails = {}
+    if 'segmented_fcs' not in st.session_state:
+        st.session_state.segmented_fcs = SegmentedFCSAnalyzer()
 
     
     # Header
@@ -571,6 +574,42 @@ def main():
                                     st.error(f"❌ ICS analysis failed: {result.get('message')}")
                         except Exception as e:
                             st.error(f"❌ ICS analysis error: {str(e)}")
+
+            # Segmented FCS UI (appears for FCS data type or if intensity series present)
+            st.subheader("🧪 Segmented FCS (temporal segmentation)")
+            if st.session_state.data_type == 'fcs' and st.session_state.loaded_data is not None:
+                seg_defaults = get_segmented_fcs_parameters()
+                c1, c2, c3, c4 = st.columns(4)
+                seg_defaults['model'] = c1.selectbox("Model", ["2D", "3D", "anomalous"], index=["2D", "3D", "anomalous"].index(seg_defaults['model']))
+                seg_defaults['beam_waist_um'] = c2.number_input("Beam waist ω (µm)", value=seg_defaults['beam_waist_um'], min_value=0.05, step=0.05)
+                seg_defaults['kappa'] = c3.number_input("κ (axial/lat.)", value=seg_defaults['kappa'], min_value=1.0, step=0.5)
+                seg_defaults['alpha'] = c4.number_input("α (anomalous)", value=seg_defaults['alpha'], min_value=0.3, max_value=1.3, step=0.05)
+                d1, d2, d3, d4 = st.columns(4)
+                seg_defaults['window_s'] = d1.number_input("Window (s)", value=seg_defaults['window_s'], min_value=1.0, step=0.5)
+                seg_defaults['step_s'] = d2.number_input("Step (s)", value=seg_defaults['step_s'], min_value=0.1, step=0.1)
+                seg_defaults['m_coarsening'] = d3.number_input("multipletau m", value=seg_defaults['m_coarsening'], min_value=2, step=2)
+                max_lag_default = seg_defaults['window_s'] / 2 if (seg_defaults.get('max_lag_s') is None) else seg_defaults['max_lag_s']
+                seg_defaults['max_lag_s'] = d4.number_input("Max lag τ (s)", value=max_lag_default, min_value=0.05, step=0.05)
+                seg_defaults['detrend'] = st.checkbox("Detrend per segment", value=seg_defaults['detrend'])
+                run_seg = st.button("Run Segmented FCS", type="primary")
+                if run_seg:
+                    try:
+                        # Expect loaded_data to contain intensity_series and dt_seconds
+                        data_info = st.session_state.loaded_data
+                        if 'intensity_series' not in data_info or 'dt_seconds' not in data_info:
+                            st.error("Loaded FCS data missing 'intensity_series' or 'dt_seconds'.")
+                        else:
+                            intensity = np.asarray(data_info['intensity_series'], dtype=float)
+                            dt = float(data_info['dt_seconds'])
+                            result = st.session_state.segmented_fcs.analyze(intensity, dt=dt, **seg_defaults)
+                            if result.get('status') == 'success':
+                                st.session_state.analysis_results['Segmented FCS'] = result
+                                st.success(f"Computed {result['n_segments']} segments | median D {result['median_D_um2_s']:.3g} µm²/s")
+                                st.dataframe(result['segments'])
+                            else:
+                                st.error(result.get('message', 'Unknown error during Segmented FCS'))
+                    except Exception as e:
+                        st.error(f"Segmented FCS failed: {e}")
         
         # Analysis selection (only show if data is loaded)
         if st.session_state.loaded_data is not None:

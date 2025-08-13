@@ -577,6 +577,25 @@ class AutomatedReportGenerator:
                 for key, value in specialized_summary['advanced_metrics'].items():
                     content.append(f"- **{key.replace('_', ' ').title()}:** {value}\n")
                 content.append("\n")
+
+        # Segmented FCS section if present
+        if 'Segmented FCS' in analysis_results:
+            seg_result = analysis_results['Segmented FCS']
+            if isinstance(seg_result, dict) and seg_result.get('status') == 'success':
+                segments_df = seg_result.get('segments')
+                content.append("## Segmented FCS\n")
+                content.append(f"Computed {seg_result.get('n_segments', 0)} segments. ")
+                content.append(f"Median D: {seg_result.get('median_D_um2_s', 0):.4g} µm²/s | ")
+                content.append(f"Median τD: {seg_result.get('median_tauD_s', 0):.4g} s | ")
+                content.append(f"Median N: {seg_result.get('median_N_est', 0):.3g}\n\n")
+                try:
+                    # Include compact CSV (first few lines) for readability
+                    if hasattr(segments_df, 'head'):
+                        csv_preview = segments_df.head(10).to_csv(index=False)
+                        content.append("Segment Summary (first 10):\n")
+                        content.append("``" + "`\n" + csv_preview + "``" + "`\n")
+                except Exception:
+                    pass
         
         # Conclusions and Recommendations
         content.append("## Conclusions and Recommendations\n")

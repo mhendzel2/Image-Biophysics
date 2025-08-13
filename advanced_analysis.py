@@ -616,7 +616,6 @@ class AdvancedAnalysisManager:
     
     def _create_colored_masks(self, masks: np.ndarray) -> np.ndarray:
         """Create colored overlay for segmentation masks"""
-        from matplotlib.colors import ListedColormap
         import matplotlib.cm as cm
         
         # Create random colors for each label

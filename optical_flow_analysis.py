@@ -509,15 +509,33 @@ class OpticalFlowAnalyzer:
                     gamma_xy = 0.5 * (np.gradient(u, y_coords, axis=0) + 
                                      np.gradient(v, x_coords, axis=0))
                     
+                    exx = float(np.mean(epsilon_xx)) if len(epsilon_xx) > 0 else 0.0
+                    eyy = float(np.mean(epsilon_yy)) if len(epsilon_yy) > 0 else 0.0
+                    gxy = float(np.mean(gamma_xy)) if len(gamma_xy) > 0 else 0.0
+
+                    # Form small-strain symmetric tensor (engineering shear gamma_xy = 2*epsilon_xy)
+                    E = np.array([[exx, 0.5 * gxy],
+                                  [0.5 * gxy, eyy]], dtype=float)
+                    try:
+                        w, _ = np.linalg.eig(E)
+                        w = np.sort(w)[::-1]
+                        principal_1 = float(w[0])
+                        principal_2 = float(w[1])
+                    except Exception:
+                        principal_1 = exx
+                        principal_2 = eyy
+
+                    # Von Mises equivalent strain (plane stress approximation)
+                    von_mises = float(np.sqrt(exx**2 - exx*eyy + eyy**2 + 3.0 * (gxy**2)))
+
                     strain_fields.append({
                         'frame': dic_field['frame'],
-                        'epsilon_xx': np.mean(epsilon_xx) if len(epsilon_xx) > 0 else 0,
-                        'epsilon_yy': np.mean(epsilon_yy) if len(epsilon_yy) > 0 else 0,
-                        'gamma_xy': np.mean(gamma_xy) if len(gamma_xy) > 0 else 0,
-                        'principal_strain_1': np.mean(epsilon_xx + epsilon_yy) if len(epsilon_xx) > 0 else 0,
-                        'von_mises_strain': np.sqrt(0.5 * ((epsilon_xx - epsilon_yy)**2 + 
-                                                          epsilon_xx**2 + epsilon_yy**2 + 
-                                                          6 * gamma_xy**2)).mean() if len(epsilon_xx) > 0 else 0
+                        'epsilon_xx': exx,
+                        'epsilon_yy': eyy,
+                        'gamma_xy': gxy,
+                        'principal_strain_1': principal_1,
+                        'principal_strain_2': principal_2,
+                        'von_mises_strain': von_mises
                     })
                 except Exception:
                     strain_fields.append({

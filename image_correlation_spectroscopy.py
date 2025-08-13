@@ -142,15 +142,29 @@ class ImageCorrelationSpectroscopy:
                 shifted_delta_I = np.roll(np.roll(delta_I, tau, axis=1), eta, axis=2)
                 shifted_delta_I[:, :max(0, tau), :] = 0  # Zero-pad top
                 shifted_delta_I[:, -min(0, tau):, :] = 0  # Zero-pad bottom
-                
+                shifted_delta_I[:, :, :max(0, eta)] = 0  # Zero-pad left
+                shifted_delta_I[:, :, -min(0, eta):] = 0  # Zero-pad right
+
                 for t in range(T):
                     frame = delta_I[t]
-                    
-                    # Calculate valid region for correlation
-                    y_start = max(0, -tau)
-                    y_end = min(H, H - tau)
-                    correlation_sum = np.sum(frame * shifted_delta_I[t])
-                    correlation[tau + tau_max, eta + eta_max] = correlation_sum / (H * W)
+                    shifted_frame = shifted_delta_I[t]
+
+                    # Create mask for valid (non-padded) pixels
+                    valid_mask = (shifted_frame != 0) | (frame != 0)
+                    # Only consider overlapping region (where both are not padded)
+                    overlap_mask = (shifted_frame != 0) & (frame != 0)
+                    # If tau == 0 and eta == 0, all pixels are valid
+                    if tau == 0 and eta == 0:
+                        overlap_mask = np.ones_like(frame, dtype=bool)
+
+                    if np.any(overlap_mask):
+                        correlation_sum += np.sum(frame[overlap_mask] * shifted_frame[overlap_mask])
+                        count += np.sum(overlap_mask)
+
+                if count > 0:
+                    correlation[tau + tau_max, eta + eta_max] = correlation_sum / count
+                else:
+                    correlation[tau + tau_max, eta + eta_max] = 0
         return correlation
     
     def _fit_rics_diffusion_model(self, correlation: np.ndarray, pixel_size: float,
@@ -1066,6 +1080,47 @@ class ImageCorrelationSpectroscopy:
                 'tau': 0,
                 'offset': 0
             }
+
+    # --- Lightweight hooks for extended analyses (STICS maps & pair correlation) ---
+    def stics(self, stack: np.ndarray, max_tau: int = 10) -> Dict[str, Any]:
+        """Compute spatio-temporal correlation G(Δx,Δy; τ) for τ=0..max_tau via FFT.
+
+        Parameters
+        ----------
+        stack : ndarray (T,Y,X)
+        max_tau : int
+            Maximum temporal lag.
+        """
+        stack = np.asarray(stack, dtype=float)
+        if stack.ndim != 3:
+            raise ValueError("STICS expects (T, Y, X) stack")
+        T, Y, X = stack.shape
+        taus = min(max_tau, T - 1)
+        maps: List[np.ndarray] = []
+        f = np.fft.rfftn
+        ifft = np.fft.irfftn
+        for lag in range(taus + 1):
+            acc = np.zeros((Y, X))
+            count = 0
+            for t in range(0, T - lag):
+                a = stack[t] - stack[t].mean()
+                b = stack[t + lag] - stack[t + lag].mean()
+                A = f(a)
+                B = f(b)
+                acc += ifft(A * np.conjugate(B)).real
+                count += 1
+            acc /= max(count, 1)
+            maps.append(acc)
+        return {'status': 'success', 'tau_maps': maps, 'max_tau': taus}
+
+    def pair_correlation(self, image: np.ndarray, dy: int, dx: int) -> float:
+        """Pair-correlation pCF at fixed offset (dy, dx) within a single 2D image."""
+        img = np.asarray(image, dtype=float)
+        mu = img.mean()
+        if mu == 0:
+            mu = 1e-12
+        shifted = np.roll(np.roll(img, dy, axis=0), dx, axis=1)
+        return float(((img - mu) * (shifted - mu)).mean() / (mu * mu))
 
 def get_ics_parameters(method: str) -> Dict[str, Any]:
     """Get default parameters for ICS methods"""

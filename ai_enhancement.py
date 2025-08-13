@@ -14,6 +14,7 @@ import os
 from scipy import ndimage
 from skimage import restoration, img_as_float
 from skimage.io import imread, imsave
+from skimage.restoration import denoise_nl_means
 
 # Import AI enhancement libraries with graceful fallbacks
 # PyTorch isolation to prevent Streamlit file watcher conflicts
