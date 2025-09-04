@@ -35,7 +35,7 @@ streamlit>=1.45.1
 ############################################################
 
 # AI / Deep learning (install CUDA wheels where appropriate)
-torch>=2.0.0  # adjust upward if your platform supports newer
+torch>=2.8.0  # adjust upward if your platform supports newer
 torchvision>=0.15.0
 # Optional AI segmentation / restoration extras
 cellpose>=2.2.0
@@ -55,3 +55,13 @@ setuptools>=80.9.0
 # NOTE:
 # - Packages are aligned with pyproject.toml (authoritative) and setup.py extras.
 # - Comment out heavy/optional AI deps if not needed.
+anyio>=4.4.0 # not directly required, pinned by Snyk to avoid a vulnerability
+dnspython>=2.6.1 # not directly required, pinned by Snyk to avoid a vulnerability
+fonttools>=4.43.0 # not directly required, pinned by Snyk to avoid a vulnerability
+h11>=0.16.0 # not directly required, pinned by Snyk to avoid a vulnerability
+imagecodecs>=2023.9.18 # not directly required, pinned by Snyk to avoid a vulnerability
+pillow>=10.3.0 # not directly required, pinned by Snyk to avoid a vulnerability
+requests>=2.32.4 # not directly required, pinned by Snyk to avoid a vulnerability
+urllib3>=2.5.0 # not directly required, pinned by Snyk to avoid a vulnerability
+wheel>=0.38.0 # not directly required, pinned by Snyk to avoid a vulnerability
+zipp>=3.19.1 # not directly required, pinned by Snyk to avoid a vulnerability
