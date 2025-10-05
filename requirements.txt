@@ -41,11 +41,14 @@ torch>=2.0.0
 torchvision>=0.15.0
 # Optional AI segmentation / restoration extras
 cellpose>=3.0.0  # Uses newer architecture compatible with NumPy 1.x
-stardist>=0.9.0  # Newer version with better NumPy compatibility
-csbdeep>=0.7.4
-n2v>=0.3.3  # Noise2Void library is published as 'n2v', not 'noise2void'
-# TensorFlow pinned to avoid NumPy 2.0 issues
-tensorflow>=2.13.0,<2.16.0  # optional; only needed for some AI methods
+# Note: stardist and n2v have conflicting csbdeep requirements
+# Install separately: pip install stardist OR pip install n2v csbdeep<0.8.0
+# stardist>=0.9.0  # Requires csbdeep>=0.8.0
+# csbdeep>=0.7.4
+# n2v>=0.3.3  # Requires csbdeep<0.8.0 - conflicts with stardist
+# TensorFlow - Note: Use Python 3.11 if you need TensorFlow <2.16
+# For Python 3.12+, only TensorFlow 2.16+ is available
+# tensorflow>=2.16.0  # optional; uncomment if needed for AI methods
 
 # Reporting
 reportlab>=4.0.0
