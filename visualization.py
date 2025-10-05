@@ -43,11 +43,18 @@ class VisualizationManager:
             contrast_mode: Contrast adjustment method
             colormap: Colormap to use
             aspect_ratio: Aspect ratio setting
+            channel_color: Optional hex color for channel-specific colormaps
         """
         
-        if image_data.size == 0:
+        if image_data is None or image_data.size == 0:
             st.warning("No image data to display")
             return
+        
+        # Validate colormap
+        valid_colormaps = list(self.color_schemes.values()) + ['Reds', 'Greens', 'Blues', 'YlOrRd', 'BuPu', 'Oranges', 'Purples', 'RdPu', 'copper', 'RdBu_r']
+        if colormap not in valid_colormaps:
+            st.warning(f"Invalid colormap '{colormap}', using 'viridis'")
+            colormap = 'viridis'
         
         # Handle contrast adjustment
         if contrast_mode == "Auto":
@@ -233,13 +240,19 @@ class VisualizationManager:
         with col1:
             st.metric("Correlation Curves", analysis_summary.get('num_correlation_curves', 0))
         with col2:
-            st.metric("Mean Diffusion Time", f"{analysis_summary.get('mean_diffusion_time', 0):.3f} s")
+            mean_diffusion_time = analysis_summary.get('mean_diffusion_time', 0)
+            st.metric("Mean Diffusion Time", f"{mean_diffusion_time:.3f} s")
         with col3:
-            st.metric("Mean Amplitude", f"{analysis_summary.get('mean_amplitude', 0):.3f}")
+            mean_amplitude = analysis_summary.get('mean_amplitude', 0)
+            st.metric("Mean Amplitude", f"{mean_amplitude:.3f}")
         
         # Display correlation curves
         if 'correlation_curves' in results and results['correlation_curves']:
             correlation_curves = results['correlation_curves']
+            
+            if not isinstance(correlation_curves, list) or len(correlation_curves) == 0:
+                st.warning("No valid correlation curves to display")
+                return
             
             # Plot selection
             if len(correlation_curves) > 1:
@@ -249,6 +262,11 @@ class VisualizationManager:
             
             if curve_idx < len(correlation_curves):
                 curve = correlation_curves[curve_idx]
+                
+                if curve is None or len(curve) == 0:
+                    st.warning(f"Correlation curve {curve_idx} is empty")
+                    return
+                
                 time_axis = np.arange(len(curve)) * results.get('time_interval', 0.1)
                 
                 fig = go.Figure()
@@ -269,6 +287,8 @@ class VisualizationManager:
                 )
                 
                 st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.info("No correlation curves available for display")
         
         # Fit results table
         if 'fit_results' in results:
@@ -285,23 +305,26 @@ class VisualizationManager:
         
         col1, col2, col3 = st.columns(3)
         with col1:
+            mean_diffusion = diffusion_analysis.get('mean_diffusion', 0)
             st.metric(
                 "Mean Diffusion Coefficient", 
-                f"{diffusion_analysis.get('mean_diffusion', 0):.3f} µm²/s"
+                f"{mean_diffusion:.3f} µm²/s"
             )
         with col2:
+            mean_alpha = diffusion_analysis.get('mean_alpha', 1)
             st.metric(
                 "Anomalous Exponent", 
-                f"{diffusion_analysis.get('mean_alpha', 1):.3f}"
+                f"{mean_alpha:.3f}"
             )
         with col3:
+            num_regions = analysis_summary.get('num_regions_analyzed', 0)
             st.metric(
                 "Regions Analyzed", 
-                analysis_summary.get('num_regions_analyzed', 0)
+                num_regions
             )
         
         # MSD visualization
-        if 'msd_maps' in results and results['msd_maps'].size > 0:
+        if 'msd_maps' in results and results['msd_maps'] is not None and results['msd_maps'].size > 0:
             msd_maps = results['msd_maps']
             
             # Time lag selection
@@ -312,29 +335,42 @@ class VisualizationManager:
                 title=f"MSD Map (τ = {lag_idx})",
                 colormap="plasma"
             )
+        else:
+            st.info("No MSD maps available for display")
         
         # Diffusion coefficient and anomalous exponent distributions
         if diffusion_analysis.get('diffusion_coefficients'):
-            col1, col2 = st.columns(2)
+            diffusion_coeffs = diffusion_analysis['diffusion_coefficients']
             
-            with col1:
-                fig = px.histogram(
-                    x=diffusion_analysis['diffusion_coefficients'],
-                    nbins=30,
-                    title="Diffusion Coefficient Distribution",
-                    labels={'x': 'D (µm²/s)', 'y': 'Count'}
-                )
-                st.plotly_chart(fig, use_container_width=True)
-            
-            with col2:
-                if diffusion_analysis.get('anomalous_exponents'):
+            if len(diffusion_coeffs) > 0:
+                col1, col2 = st.columns(2)
+                
+                with col1:
                     fig = px.histogram(
-                        x=diffusion_analysis['anomalous_exponents'],
+                        x=diffusion_coeffs,
                         nbins=30,
-                        title="Anomalous Exponent Distribution",
-                        labels={'x': 'α', 'y': 'Count'}
+                        title="Diffusion Coefficient Distribution",
+                        labels={'x': 'D (µm²/s)', 'y': 'Count'}
                     )
                     st.plotly_chart(fig, use_container_width=True)
+                
+                with col2:
+                    if diffusion_analysis.get('anomalous_exponents'):
+                        anom_exps = diffusion_analysis['anomalous_exponents']
+                        if len(anom_exps) > 0:
+                            fig = px.histogram(
+                                x=anom_exps,
+                                nbins=30,
+                                title="Anomalous Exponent Distribution",
+                                labels={'x': 'α', 'y': 'Count'}
+                            )
+                            st.plotly_chart(fig, use_container_width=True)
+                        else:
+                            st.info("No anomalous exponents available")
+            else:
+                st.info("No diffusion coefficients available for distribution plot")
+        else:
+            st.info("No diffusion analysis data available")
     
     def _display_generic_results(self, results: Dict[str, Any]) -> None:
         """Display generic analysis results"""
@@ -529,6 +565,7 @@ class VisualizationManager:
             )
         
         with col2:
+            opacity = 0.7  # Default opacity
             if display_mode == "Composite Overlay":
                 opacity = st.slider("Channel Opacity", 0.1, 1.0, 0.7, 0.1)
         
@@ -606,8 +643,16 @@ class VisualizationManager:
         }
         
         for i, (img, color) in enumerate(zip(image_list[:3], colors[:3])):
-            # Normalize image to 0-1
-            img_norm = (img - np.min(img)) / (np.max(img) - np.min(img)) if np.max(img) > np.min(img) else img
+            # Normalize image to 0-1 with safe division
+            img_min = np.min(img)
+            img_max = np.max(img)
+            img_range = img_max - img_min
+            
+            if img_range > 0:
+                img_norm = (img - img_min) / img_range
+            else:
+                # If all values are the same, use zeros or the constant value
+                img_norm = np.zeros_like(img) if img_max == 0 else np.ones_like(img)
             
             # Get RGB weights for this color
             rgb_weights = color_map.get(color.upper(), [1, 1, 1])

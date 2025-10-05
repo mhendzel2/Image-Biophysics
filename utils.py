@@ -80,17 +80,17 @@ def validate_rics_parameters(parameters: Dict[str, Any]) -> bool:
             st.error(f"Missing required parameter: {param}")
             return False
     
-    # Value range checks
+    # Value range checks with informative messages
     if parameters['tau_max'] <= 0 or parameters['tau_max'] > 1000:
-        st.error("tau_max must be between 1 and 1000")
+        st.error(f"tau_max must be between 1 and 1000. Got: {parameters['tau_max']}")
         return False
     
     if parameters['pixel_size'] <= 0 or parameters['pixel_size'] > 10:
-        st.error("pixel_size must be between 0 and 10 µm")
+        st.error(f"pixel_size must be between 0 and 10 µm. Got: {parameters['pixel_size']}")
         return False
     
     if parameters['time_interval'] <= 0 or parameters['time_interval'] > 100:
-        st.error("time_interval must be between 0 and 100 seconds")
+        st.error(f"time_interval must be between 0 and 100 seconds. Got: {parameters['time_interval']}")
         return False
     
     return True
@@ -100,12 +100,12 @@ def validate_fcs_parameters(parameters: Dict[str, Any]) -> bool:
     
     if 'correlation_window' in parameters:
         if parameters['correlation_window'] < 4 or parameters['correlation_window'] > 128:
-            st.error("correlation_window must be between 4 and 128 pixels")
+            st.error(f"correlation_window must be between 4 and 128 pixels. Got: {parameters['correlation_window']}")
             return False
     
     if 'binning' in parameters:
         if parameters['binning'] < 1 or parameters['binning'] > 20:
-            st.error("binning must be between 1 and 20")
+            st.error(f"binning must be between 1 and 20. Got: {parameters['binning']}")
             return False
     
     return True
@@ -417,7 +417,10 @@ def safe_divide(numerator: Union[float, np.ndarray],
     if isinstance(denominator, np.ndarray):
         result = np.full_like(denominator, default_value, dtype=float)
         mask = denominator != 0
-        result[mask] = numerator[mask] / denominator[mask] if isinstance(numerator, np.ndarray) else numerator / denominator[mask]
+        if isinstance(numerator, np.ndarray):
+            result[mask] = numerator[mask] / denominator[mask]
+        else:
+            result[mask] = numerator / denominator[mask]
         return result
     else:
         return numerator / denominator if denominator != 0 else default_value
@@ -469,14 +472,27 @@ def validate_roi_coordinates(roi_coords: Tuple[int, int, int, int],
     """
     
     x_start, y_start, x_end, y_end = roi_coords
-    height, width = image_shape[-2:]  # Assume last two dimensions are spatial
+    
+    # Handle various image dimensions
+    if len(image_shape) < 2:
+        st.error("Image must be at least 2D")
+        return False
+    
+    # Get spatial dimensions (last two dimensions are typically spatial)
+    height, width = image_shape[-2:]
     
     # Check bounds
-    if x_start < 0 or y_start < 0 or x_end >= width or y_end >= height:
+    if x_start < 0 or y_start < 0:
+        st.error(f"ROI coordinates must be non-negative. Got x_start={x_start}, y_start={y_start}")
+        return False
+    
+    if x_end >= width or y_end >= height:
+        st.error(f"ROI exceeds image bounds. Image size: {width}x{height}, ROI end: ({x_end}, {y_end})")
         return False
     
     # Check that end > start
     if x_end <= x_start or y_end <= y_start:
+        st.error(f"ROI end coordinates must be greater than start. Got: ({x_start}, {y_start}) to ({x_end}, {y_end})")
         return False
     
     return True
