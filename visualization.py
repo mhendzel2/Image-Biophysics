@@ -12,6 +12,8 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from typing import Dict, Any, Optional, List, Tuple
 import warnings
+from skimage import exposure
+
 
 class VisualizationManager:
     """Main visualization manager with shared methods across analysis types"""
@@ -108,6 +110,48 @@ class VisualizationManager:
             self._display_imsd_results(results)
         else:
             self._display_generic_results(results)
+            
+    def display_3d_volume(self, 
+                        image_data: np.ndarray, 
+                        title: str = "3D Volume",
+                        colormap: str = "viridis") -> None:
+        """Display a 3D volume using Plotly"""
+        if image_data.ndim != 3:
+            st.error("3D volume display requires a 3D image stack.")
+            return
+
+        # Normalize and prepare data for volume rendering
+        volume_data = exposure.rescale_intensity(image_data, in_range='image', out_range=(0, 1))
+        
+        # Get dimensions
+        z, y, x = volume_data.shape
+
+        fig = go.Figure(data=go.Volume(
+            x=np.arange(x),
+            y=np.arange(y),
+            z=np.arange(z),
+            value=volume_data.flatten(),
+            isomin=0.1,  # Adjust for transparency
+            isomax=0.8,
+            opacity=0.1, # Low opacity for translucent rendering
+            surface_count=17, # Number of surfaces to draw
+            colorscale=colormap,
+            caps=dict(x_show=False, y_show=False, z_show=False), # Hide caps
+            colorbar=dict(title="Intensity")
+        ))
+
+        fig.update_layout(
+            title=title,
+            scene=dict(
+                xaxis_title='X',
+                yaxis_title='Y',
+                zaxis_title='Z',
+                aspectratio=dict(x=1, y=1, z=1),
+                aspectmode='cube'
+            )
+        )
+
+        st.plotly_chart(fig, use_container_width=True)
     
     def _display_rics_results(self, results: Dict[str, Any]) -> None:
         """Display RICS analysis results with multichannel support"""
@@ -625,7 +669,7 @@ class VisualizationManager:
                                 titles: Optional[Dict[str, str]] = None) -> go.Figure:
         """Create multi-panel figure for comparative visualization"""
         
-        n_panels = len(data_dict)
+        n_panels = len(.data_dict)
         cols = int(np.ceil(np.sqrt(n_panels)))
         rows = int(np.ceil(n_panels / cols))
         

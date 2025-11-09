@@ -43,6 +43,7 @@ stardist>=0.8.3
 csbdeep>=0.7.4
 n2v>=0.3.0  # Noise2Void library is published as 'n2v', not 'noise2void'
 tensorflow>=2.13.0  # optional; only needed for some AI methods
+aics-segmentation>=0.1.0
 
 # Reporting
 reportlab>=4.0.4

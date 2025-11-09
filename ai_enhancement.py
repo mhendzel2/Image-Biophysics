@@ -12,6 +12,7 @@ import os
 
 # Core scientific libraries
 from scipy import ndimage
+from scipy.signal import convolve
 from skimage import restoration, img_as_float
 from skimage.io import imread, imsave
 from skimage.restoration import denoise_nl_means
@@ -72,6 +73,15 @@ except ImportError:
     STARDIST_AVAILABLE = False
     warnings.warn("StarDist not available - nucleus segmentation disabled")
 
+try:
+    from aics_segmentation.core.pre_processing_utils import image_normalization
+    from aics_segmentation.core.workflows import W_General, W_Lamin, W_Myo, W_Sox, W_Membrane, W_Sec61b
+    AICS_SEGMENTATION_AVAILABLE = True
+except ImportError:
+    AICS_SEGMENTATION_AVAILABLE = False
+    warnings.warn("AICS-Segmentation not available - AI segmentation limited")
+
+
 class AIEnhancementManager:
     """Main manager for AI-based image enhancement techniques"""
     
@@ -84,8 +94,10 @@ class AIEnhancementManager:
             'noise2void': TORCH_AVAILABLE,
             'classical_denoising': True,  # scikit-image always available
             'richardson_lucy': True,
+            'richardson_lucy_tv': True,
             'cellpose_segmentation': CELLPOSE_AVAILABLE,
             'stardist_segmentation': STARDIST_AVAILABLE,
+            'aics_segmentation': AICS_SEGMENTATION_AVAILABLE,
             'tensorflow_methods': TF_AVAILABLE
         }
     
@@ -94,12 +106,16 @@ class AIEnhancementManager:
         available = []
         if self.available_methods['classical_denoising']:
             available.extend(['Non-local Means Denoising', 'Richardson-Lucy Deconvolution'])
+        if self.available_methods['richardson_lucy_tv']:
+            available.append('Richardson-Lucy with Total Variation')
         if self.available_methods['noise2void']:
             available.append('Noise2Void Self-Supervised Denoising')
         if self.available_methods['cellpose_segmentation']:
             available.extend(['Cellpose Cell Segmentation', 'Cellpose Nucleus Segmentation'])
         if self.available_methods['stardist_segmentation']:
             available.append('StarDist Nucleus Segmentation')
+        if self.available_methods['aics_segmentation']:
+            available.append('AICS Cell Segmentation')
         return available
     
     def enhance_image(self, image_data: np.ndarray, method: str, 
@@ -110,6 +126,8 @@ class AIEnhancementManager:
             return self._apply_nlm_denoising(image_data, parameters)
         elif method == 'Richardson-Lucy Deconvolution':
             return self._apply_richardson_lucy(image_data, parameters)
+        elif method == 'Richardson-Lucy with Total Variation':
+            return self._apply_richardson_lucy_tv(image_data, parameters)
         elif method == 'Noise2Void Self-Supervised Denoising':
             return self._apply_noise2void(image_data, parameters)
         elif method == 'Cellpose Cell Segmentation':
@@ -118,6 +136,8 @@ class AIEnhancementManager:
             return self._apply_cellpose_segmentation(image_data, parameters, model_type='nuclei')
         elif method == 'StarDist Nucleus Segmentation':
             return self._apply_stardist_segmentation(image_data, parameters)
+        elif method == 'AICS Cell Segmentation':
+            return self._apply_aics_segmentation(image_data, parameters)
         else:
             return {'status': 'error', 'message': f'Unknown enhancement method: {method}'}
     
@@ -227,7 +247,67 @@ class AIEnhancementManager:
             
         except Exception as e:
             return {'status': 'error', 'message': f'Richardson-Lucy deconvolution failed: {str(e)}'}
-    
+            
+    def _apply_richardson_lucy_tv(self, image_data: np.ndarray, 
+                                  parameters: Dict[str, Any]) -> Dict[str, Any]:
+        """Apply Richardson-Lucy deconvolution with Total Variation regularization."""
+        try:
+            image_float = img_as_float(image_data)
+            iterations = parameters.get('iterations', 30)
+            lambda_tv = parameters.get('lambda_tv', 0.01) # Regularization parameter
+            psf_size = parameters.get('psf_size', 5)
+            psf_sigma = parameters.get('psf_sigma', 1.0)
+
+            # Generate Gaussian PSF
+            x = np.arange(psf_size) - psf_size // 2
+            if len(image_data.shape) == 2:
+                xx, yy = np.meshgrid(x, x)
+                psf = np.exp(-(xx**2 + yy**2) / (2 * psf_sigma**2))
+            else:
+                xx, yy, zz = np.meshgrid(x, x, x)
+                psf = np.exp(-(xx**2 + yy**2 + zz**2) / (2 * psf_sigma**2))
+            psf /= np.sum(psf)
+
+            # Richardson-Lucy with TV
+            deconvolved = restoration.richardson_lucy(image_float, psf, iterations=iterations, clip=False)
+            
+            # Total Variation regularization
+            for _ in range(iterations):
+                # Convolution with PSF
+                convolved = convolve(deconvolved, psf, mode='same')
+                relative_blur = image_float / (convolved + 1e-10)
+                
+                # Error correction term
+                correction = convolve(relative_blur, psf[::-1, ::-1], mode='same')
+
+                # Gradient for TV regularization
+                grad_x = np.gradient(deconvolved, axis=1)
+                grad_y = np.gradient(deconvolved, axis=0)
+                
+                # Divergence of normalized gradient
+                norm = np.sqrt(grad_x**2 + grad_y**2 + 1e-10)
+                div = np.gradient(grad_x / norm, axis=1) + np.gradient(grad_y / norm, axis=0)
+
+                # Update with TV term
+                deconvolved *= correction / (1 - lambda_tv * div)
+                deconvolved = np.clip(deconvolved, 0, 1) # Clip to valid range
+
+            # Convert back to original data type range
+            if image_data.dtype == np.uint8:
+                enhanced = (deconvolved * 255).astype(np.uint8)
+            elif image_data.dtype == np.uint16:
+                enhanced = (deconvolved * 65535).astype(np.uint16)
+            else:
+                enhanced = deconvolved.astype(image_data.dtype)
+
+            return {
+                'enhanced_image': enhanced,
+                'method': 'Richardson-Lucy with Total Variation',
+                'status': 'success'
+            }
+        except Exception as e:
+            return {'status': 'error', 'message': f'RL-TV deconvolution failed: {e}'}
+
     def _apply_noise2void(self, image_data: np.ndarray, 
                          parameters: Dict[str, Any]) -> Dict[str, Any]:
         """Apply Noise2Void-style self-supervised denoising using enhanced methods"""
@@ -403,7 +483,48 @@ class AIEnhancementManager:
         except Exception as e:
             return {'status': 'error', 'message': f'StarDist segmentation failed: {str(e)}'}
 
-# MicroscopyDataset class disabled since PyTorch is not available
+    def _apply_aics_segmentation(self, image_data: np.ndarray,
+                                 parameters: Dict[str, Any]) -> Dict[str, Any]:
+        """Apply AICS-Cell-Segmenter"""
+        if not AICS_SEGMENTATION_AVAILABLE:
+            return {'status': 'error', 'message': 'AICS-Segmentation library required for AI segmentation'}
+        try:
+            # Extract parameters
+            model_name = parameters.get('model_name', 'General')
+            
+            # Select workflow
+            if model_name == 'Lamin':
+                workflow = W_Lamin()
+            elif model_name == 'Myo':
+                workflow = W_Myo()
+            elif model_name == 'Sox':
+                workflow = W_Sox()
+            elif model_name == 'Membrane':
+                workflow = W_Membrane()
+            elif model_name == 'Sec61b':
+                workflow = W_Sec61b()
+            else:
+                workflow = W_General()
+
+            # Normalize image
+            normalized_image = image_normalization(image_data)
+            
+            # Run segmentation
+            segmentation_result = workflow.execute_flow(normalized_image)
+            
+            return {
+                'segmentation_masks': segmentation_result,
+                'original_image': image_data,
+                'method': f'AICS {model_name} Segmentation',
+                'parameters_used': {
+                    'model_name': model_name,
+                },
+                'num_objects': len(np.unique(segmentation_result)) - 1,
+                'status': 'success'
+            }
+        except Exception as e:
+            return {'status': 'error', 'message': f'AICS segmentation failed: {str(e)}'}
+
 
 def get_enhancement_parameters(method: str) -> Dict[str, Any]:
     """Get default parameters for enhancement methods"""
@@ -422,6 +543,13 @@ def get_enhancement_parameters(method: str) -> Dict[str, Any]:
             'psf_size': 5,
             'psf_sigma': 1.0
         }
+    elif method == 'Richardson-Lucy with Total Variation':
+        return {
+            'iterations': 10,
+            'lambda_tv': 0.002,
+            'psf_size': 5,
+            'psf_sigma': 1.0
+        }
     elif method in ['Cellpose Cell Segmentation', 'Cellpose Nucleus Segmentation']:
         return {
             'diameter': 30,
@@ -433,6 +561,10 @@ def get_enhancement_parameters(method: str) -> Dict[str, Any]:
             'model_name': '2D_versatile_fluo',
             'prob_thresh': None,
             'nms_thresh': None
+        }
+    elif method == 'AICS Cell Segmentation':
+        return {
+            'model_name': 'General'
         }
     else:
         return {}

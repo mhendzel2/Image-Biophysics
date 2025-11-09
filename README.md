@@ -20,7 +20,7 @@ A comprehensive Streamlit-based application for microscopy data analysis, featur
 
 ### AI Enhancement
 - **Denoising**: Non-local means, Richardson-Lucy deconvolution
-- **Segmentation**: Cellpose and StarDist integration (when available)
+- **Segmentation**: Cellpose, StarDist, and AICS-Cell-Segmenter integration (when available)
 - **Noise2Void**: Self-supervised denoising (simplified implementation)
 - **Advanced methods**: CARE restoration, enhanced deconvolution
 
@@ -59,7 +59,7 @@ For full functionality, install additional libraries:
 pip install tifffile readlif pylibczirw
 
 # AI enhancement (optional)
-pip install tensorflow cellpose stardist
+pip install tensorflow cellpose stardist aics-segmentation
 
 # Advanced analysis
 pip install noise2void csbdeep
