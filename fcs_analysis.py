@@ -251,41 +251,41 @@ def analyze_segment_statistics(results: List[Dict[str, Any]]) -> Dict[str, Any]:
     if not results:
         return {'status': 'error', 'message': 'No results to analyze'}
     
-    # Extract valid diffusion coefficients
-    valid_D = [r['D'] for r in results if r['D'] > 0 and r['r_squared'] > 0.5]
-    valid_G0 = [r['G0'] for r in results if r['G0'] > 0 and r['r_squared'] > 0.5]
-    valid_w0 = [r['w0'] for r in results if r['w0'] > 0 and r['r_squared'] > 0.5]
-    r_squared_values = [r['r_squared'] for r in results]
+    # Extract valid diffusion coefficients with additional validation
+    valid_D = [r['D'] for r in results if 'D' in r and r['D'] > 0 and r.get('r_squared', 0) > 0.5]
+    valid_G0 = [r['G0'] for r in results if 'G0' in r and r['G0'] > 0 and r.get('r_squared', 0) > 0.5]
+    valid_w0 = [r['w0'] for r in results if 'w0' in r and r['w0'] > 0 and r.get('r_squared', 0) > 0.5]
+    r_squared_values = [r['r_squared'] for r in results if 'r_squared' in r]
     
     statistics = {
         'num_segments_total': len(results),
         'num_segments_valid': len(valid_D),
         'success_rate': len(valid_D) / len(results) if len(results) > 0 else 0,
-        'mean_D': np.mean(valid_D) if valid_D else 0,
-        'std_D': np.std(valid_D) if valid_D else 0,
-        'median_D': np.median(valid_D) if valid_D else 0,
-        'mean_G0': np.mean(valid_G0) if valid_G0 else 0,
-        'std_G0': np.std(valid_G0) if valid_G0 else 0,
-        'mean_w0': np.mean(valid_w0) if valid_w0 else 0,
-        'std_w0': np.std(valid_w0) if valid_w0 else 0,
-        'mean_r_squared': np.mean(r_squared_values) if r_squared_values else 0,
-        'segment_type': results[0]['segment_type'] if results else 'unknown'
+        'mean_D': float(np.mean(valid_D)) if valid_D else 0.0,
+        'std_D': float(np.std(valid_D)) if valid_D else 0.0,
+        'median_D': float(np.median(valid_D)) if valid_D else 0.0,
+        'mean_G0': float(np.mean(valid_G0)) if valid_G0 else 0.0,
+        'std_G0': float(np.std(valid_G0)) if valid_G0 else 0.0,
+        'mean_w0': float(np.mean(valid_w0)) if valid_w0 else 0.0,
+        'std_w0': float(np.std(valid_w0)) if valid_w0 else 0.0,
+        'mean_r_squared': float(np.mean(r_squared_values)) if r_squared_values else 0.0,
+        'segment_type': results[0].get('segment_type', 'unknown') if results else 'unknown'
     }
     
     # Check for anomalous diffusion parameters
     if any('alpha' in r for r in results):
-        valid_alpha = [r['alpha'] for r in results if 'alpha' in r and r['r_squared'] > 0.5]
+        valid_alpha = [r['alpha'] for r in results if 'alpha' in r and r.get('r_squared', 0) > 0.5]
         statistics.update({
-            'mean_alpha': np.mean(valid_alpha) if valid_alpha else 1,
-            'std_alpha': np.std(valid_alpha) if valid_alpha else 0
+            'mean_alpha': float(np.mean(valid_alpha)) if valid_alpha else 1.0,
+            'std_alpha': float(np.std(valid_alpha)) if valid_alpha else 0.0
         })
     
     # Check for 3D parameters
     if any('wz' in r for r in results):
-        valid_wz = [r['wz'] for r in results if 'wz' in r and r['r_squared'] > 0.5]
+        valid_wz = [r['wz'] for r in results if 'wz' in r and r.get('r_squared', 0) > 0.5]
         statistics.update({
-            'mean_wz': np.mean(valid_wz) if valid_wz else 0,
-            'std_wz': np.std(valid_wz) if valid_wz else 0
+            'mean_wz': float(np.mean(valid_wz)) if valid_wz else 0.0,
+            'std_wz': float(np.std(valid_wz)) if valid_wz else 0.0
         })
     
     return statistics

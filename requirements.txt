@@ -1,15 +1,17 @@
 # Core scientific stack
-numpy>=2.3.0
-scipy>=1.15.3
-pandas>=2.3.0
-matplotlib>=3.10.3
-plotly>=6.1.2
-scikit-image>=0.25.2
-opencv-python>=4.11.0.86
-tifffile>=2025.6.11
-h5py>=3.14.0
-pims>=0.7
-trackpy>=0.6.4
+# NOTE: NumPy capped at <2.0 for compatibility with older AI packages (stardist, n2v, csbdeep)
+# These packages use numpy.distutils which was removed in NumPy 2.0
+numpy>=1.23.0,<2.0
+scipy>=1.11.0
+pandas>=2.0.0
+matplotlib>=3.7.0
+plotly>=5.14.0
+scikit-image>=0.21.0
+opencv-python>=4.8.0
+tifffile>=2023.7.0
+h5py>=3.9.0
+pims>=0.6.1
+trackpy>=0.6.0
 
 # Correlation / spectroscopy
 multipletau>=0.4.1
@@ -27,31 +29,37 @@ psycopg2-binary>=2.9.10
 streamlit>=1.45.1
 
 ############################################################
-# Recommended Python version: 3.11.x
-# Reason: Many scientific wheels (SciPy, scikit-image, reportlab, etc.)
-# may not yet publish builds for 3.13; using 3.13 caused the errors
-# you saw (packages capped at <3.13). Use pyenv / conda to create a
-# Python 3.11 environment for reliable installation.
+# Recommended Python version: 3.10.x or 3.11.x
+# Reason: Many AI/scientific packages (stardist, n2v, csbdeep) require NumPy <2.0
+# which is incompatible with Python 3.13. NumPy 1.x doesn't have wheels for Python 3.12+.
+# Use Python 3.10 or 3.11 for best compatibility.
+# Use pyenv / conda to create a Python 3.10 or 3.11 environment.
 ############################################################
 
 # AI / Deep learning (install CUDA wheels where appropriate)
-torch>=2.8.0  # adjust upward if your platform supports newer
+torch>=2.0.0
 torchvision>=0.15.0
+
 # Optional AI segmentation / restoration extras
-cellpose>=2.2.0
-stardist>=0.8.3
-csbdeep>=0.7.4
-n2v>=0.3.0  # Noise2Void library is published as 'n2v', not 'noise2void'
-tensorflow>=2.13.0  # optional; only needed for some AI methods
-aics-segmentation>=0.1.0
+cellpose>=3.0.0  # Uses newer architecture compatible with NumPy 1.x
+# Note: stardist and n2v have conflicting csbdeep requirements
+# Install separately: pip install stardist OR pip install n2v csbdeep<0.8.0
+# stardist>=0.9.0  # Requires csbdeep>=0.8.0
+# csbdeep>=0.7.4
+# n2v>=0.3.3  # Requires csbdeep<0.8.0 - conflicts with stardist
+# TensorFlow - Note: Use Python 3.11 if you need TensorFlow <2.16
+# For Python 3.12+, only TensorFlow 2.16+ is available
+# tensorflow>=2.16.0  # optional; uncomment if needed for AI methods
+
 
 # Reporting
-reportlab>=4.0.4
+reportlab>=4.0.0
 jinja2>=3.1.0
 markdown>=3.4.0
 
 # Misc / utilities
-setuptools>=80.9.0
+setuptools>=65.0.0
+wheel>=0.40.0
 
 # NOTE:
 # - Packages are aligned with pyproject.toml (authoritative) and setup.py extras.
