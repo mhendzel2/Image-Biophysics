@@ -1,0 +1,17 @@
+numpy
+scipy
+scikit-image
+pandas
+streamlit
+torch
+torchvision
+tensorflow
+cellpose
+stardist
+csbdeep
+aics-segmentation
+python-bioformats
+jpype1
+tifffile
+Pillow
+plotly

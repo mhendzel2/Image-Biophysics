@@ -13,6 +13,8 @@ import os
 # Core scientific libraries
 from scipy import ndimage
 from scipy.signal import convolve
+from scipy.optimize import nnls
+from scipy.fft import fftn, ifftn
 from skimage import restoration, img_as_float
 from skimage.io import imread, imsave
 from skimage.restoration import denoise_nl_means
@@ -95,6 +97,10 @@ class AIEnhancementManager:
             'classical_denoising': True,  # scikit-image always available
             'richardson_lucy': True,
             'richardson_lucy_tv': True,
+            'fista': True,
+            'ista': True,
+            'ictm': True,
+            'nnls': True,
             'cellpose_segmentation': CELLPOSE_AVAILABLE,
             'stardist_segmentation': STARDIST_AVAILABLE,
             'aics_segmentation': AICS_SEGMENTATION_AVAILABLE,
@@ -108,6 +114,14 @@ class AIEnhancementManager:
             available.extend(['Non-local Means Denoising', 'Richardson-Lucy Deconvolution'])
         if self.available_methods['richardson_lucy_tv']:
             available.append('Richardson-Lucy with Total Variation')
+        if self.available_methods['fista']:
+            available.append('FISTA Deconvolution')
+        if self.available_methods['ista']:
+            available.append('ISTA Deconvolution')
+        if self.available_methods['ictm']:
+            available.append('Iterative Constraint Tikhonov-Miller')
+        if self.available_methods['nnls']:
+            available.append('Non-negative Least Squares Deconvolution')
         if self.available_methods['noise2void']:
             available.append('Noise2Void Self-Supervised Denoising')
         if self.available_methods['cellpose_segmentation']:
@@ -128,6 +142,14 @@ class AIEnhancementManager:
             return self._apply_richardson_lucy(image_data, parameters)
         elif method == 'Richardson-Lucy with Total Variation':
             return self._apply_richardson_lucy_tv(image_data, parameters)
+        elif method == 'FISTA Deconvolution':
+            return self._apply_fista(image_data, parameters)
+        elif method == 'ISTA Deconvolution':
+            return self._apply_ista(image_data, parameters)
+        elif method == 'Iterative Constraint Tikhonov-Miller':
+            return self._apply_ictm(image_data, parameters)
+        elif method == 'Non-negative Least Squares Deconvolution':
+            return self._apply_nnls_deconvolution(image_data, parameters)
         elif method == 'Noise2Void Self-Supervised Denoising':
             return self._apply_noise2void(image_data, parameters)
         elif method == 'Cellpose Cell Segmentation':
@@ -141,51 +163,44 @@ class AIEnhancementManager:
         else:
             return {'status': 'error', 'message': f'Unknown enhancement method: {method}'}
     
+    def _generate_psf(self, shape: Tuple[int, ...], psf_size: int, psf_sigma: float) -> np.ndarray:
+        """Generate a Gaussian Point Spread Function."""
+        x = np.arange(psf_size) - psf_size // 2
+        if len(shape) == 2:
+            xx, yy = np.meshgrid(x, x)
+            psf = np.exp(-(xx**2 + yy**2) / (2 * psf_sigma**2))
+        else:
+            xx, yy, zz = np.meshgrid(x, x, x)
+            psf = np.exp(-(xx**2 + yy**2 + zz**2) / (2 * psf_sigma**2))
+        psf /= np.sum(psf)
+        return psf
+
     def _apply_nlm_denoising(self, image_data: np.ndarray, 
                            parameters: Dict[str, Any]) -> Dict[str, Any]:
         """Apply non-local means denoising using scikit-image"""
         
         try:
-            # Convert to float
             image_float = img_as_float(image_data)
-            
-            # Extract parameters
             patch_size = parameters.get('patch_size', 5)
             patch_distance = parameters.get('patch_distance', 6)
             fast_mode = parameters.get('fast_mode', True)
             auto_sigma = parameters.get('auto_sigma', True)
             
             if auto_sigma:
-                # Estimate noise standard deviation
                 sigma_est = np.mean(restoration.estimate_sigma(image_float, channel_axis=None))
                 h = 1.15 * sigma_est
             else:
                 h = parameters.get('h', 0.1)
             
-            # Apply non-local means denoising
             patch_kw = dict(patch_size=patch_size, patch_distance=patch_distance, channel_axis=None)
             denoised = restoration.denoise_nl_means(
                 image_float, h=h, fast_mode=fast_mode, **patch_kw
             )
             
-            # Convert back to original data type range
-            if image_data.dtype == np.uint8:
-                enhanced = (denoised * 255).astype(np.uint8)
-            elif image_data.dtype == np.uint16:
-                enhanced = (denoised * 65535).astype(np.uint16)
-            else:
-                enhanced = denoised.astype(image_data.dtype)
+            enhanced = (denoised * (np.iinfo(image_data.dtype).max if np.issubdtype(image_data.dtype, np.integer) else 1)).astype(image_data.dtype)
             
             return {
                 'enhanced_image': enhanced,
-                'original_image': image_data,
-                'method': 'Non-local Means Denoising',
-                'parameters_used': {
-                    'patch_size': patch_size,
-                    'patch_distance': patch_distance,
-                    'h': h,
-                    'estimated_sigma': sigma_est if auto_sigma else None
-                },
                 'status': 'success'
             }
             
@@ -197,51 +212,16 @@ class AIEnhancementManager:
         """Apply Richardson-Lucy deconvolution"""
         
         try:
-            # Convert to float
             image_float = img_as_float(image_data)
-            
-            # Extract parameters
             iterations = parameters.get('iterations', 30)
-            psf_size = parameters.get('psf_size', 5)
-            psf_sigma = parameters.get('psf_sigma', 1.0)
+            psf = self._generate_psf(image_data.shape, parameters.get('psf_size', 5), parameters.get('psf_sigma', 1.0))
             
-            # Create a Gaussian PSF if not provided
-            if 'psf' in parameters and parameters['psf'] is not None:
-                psf = parameters['psf']
-            else:
-                # Generate Gaussian PSF
-                x = np.arange(psf_size) - psf_size // 2
-                if len(image_data.shape) == 2:
-                    xx, yy = np.meshgrid(x, x)
-                    psf = np.exp(-(xx**2 + yy**2) / (2 * psf_sigma**2))
-                else:
-                    # 3D PSF
-                    xx, yy, zz = np.meshgrid(x, x, x)
-                    psf = np.exp(-(xx**2 + yy**2 + zz**2) / (2 * psf_sigma**2))
-                
-                psf = psf / np.sum(psf)  # Normalize
-            
-            # Apply Richardson-Lucy deconvolution
             deconvolved = restoration.richardson_lucy(image_float, psf, iterations=iterations)
             
-            # Convert back to original data type range
-            if image_data.dtype == np.uint8:
-                enhanced = (deconvolved * 255).astype(np.uint8)
-            elif image_data.dtype == np.uint16:
-                enhanced = (deconvolved * 65535).astype(np.uint16)
-            else:
-                enhanced = deconvolved.astype(image_data.dtype)
+            enhanced = (deconvolved * (np.iinfo(image_data.dtype).max if np.issubdtype(image_data.dtype, np.integer) else 1)).astype(image_data.dtype)
             
             return {
                 'enhanced_image': enhanced,
-                'original_image': image_data,
-                'psf_used': psf,
-                'method': 'Richardson-Lucy Deconvolution',
-                'parameters_used': {
-                    'iterations': iterations,
-                    'psf_size': psf_size,
-                    'psf_sigma': psf_sigma
-                },
                 'status': 'success'
             }
             
@@ -253,142 +233,177 @@ class AIEnhancementManager:
         """Apply Richardson-Lucy deconvolution with Total Variation regularization."""
         try:
             image_float = img_as_float(image_data)
-            iterations = parameters.get('iterations', 30)
-            lambda_tv = parameters.get('lambda_tv', 0.01) # Regularization parameter
-            psf_size = parameters.get('psf_size', 5)
-            psf_sigma = parameters.get('psf_sigma', 1.0)
+            iterations = parameters.get('iterations', 10)
+            lambda_tv = parameters.get('lambda_tv', 0.002)
+            psf = self._generate_psf(image_data.shape, parameters.get('psf_size', 5), parameters.get('psf_sigma', 1.0))
 
-            # Generate Gaussian PSF
-            x = np.arange(psf_size) - psf_size // 2
-            if len(image_data.shape) == 2:
-                xx, yy = np.meshgrid(x, x)
-                psf = np.exp(-(xx**2 + yy**2) / (2 * psf_sigma**2))
-            else:
-                xx, yy, zz = np.meshgrid(x, x, x)
-                psf = np.exp(-(xx**2 + yy**2 + zz**2) / (2 * psf_sigma**2))
-            psf /= np.sum(psf)
-
-            # Richardson-Lucy with TV
             deconvolved = restoration.richardson_lucy(image_float, psf, iterations=iterations, clip=False)
             
-            # Total Variation regularization
             for _ in range(iterations):
-                # Convolution with PSF
                 convolved = convolve(deconvolved, psf, mode='same')
                 relative_blur = image_float / (convolved + 1e-10)
-                
-                # Error correction term
                 correction = convolve(relative_blur, psf[::-1, ::-1], mode='same')
 
-                # Gradient for TV regularization
                 grad_x = np.gradient(deconvolved, axis=1)
                 grad_y = np.gradient(deconvolved, axis=0)
-                
-                # Divergence of normalized gradient
                 norm = np.sqrt(grad_x**2 + grad_y**2 + 1e-10)
                 div = np.gradient(grad_x / norm, axis=1) + np.gradient(grad_y / norm, axis=0)
 
-                # Update with TV term
                 deconvolved *= correction / (1 - lambda_tv * div)
-                deconvolved = np.clip(deconvolved, 0, 1) # Clip to valid range
+                deconvolved = np.clip(deconvolved, 0, 1)
 
-            # Convert back to original data type range
-            if image_data.dtype == np.uint8:
-                enhanced = (deconvolved * 255).astype(np.uint8)
-            elif image_data.dtype == np.uint16:
-                enhanced = (deconvolved * 65535).astype(np.uint16)
-            else:
-                enhanced = deconvolved.astype(image_data.dtype)
+            enhanced = (deconvolved * (np.iinfo(image_data.dtype).max if np.issubdtype(image_data.dtype, np.integer) else 1)).astype(image_data.dtype)
 
             return {
                 'enhanced_image': enhanced,
-                'method': 'Richardson-Lucy with Total Variation',
                 'status': 'success'
             }
         except Exception as e:
             return {'status': 'error', 'message': f'RL-TV deconvolution failed: {e}'}
+
+    def _soft_threshold(self, x, threshold):
+        return np.sign(x) * np.maximum(np.abs(x) - threshold, 0)
+
+    def _apply_fista(self, image_data: np.ndarray, parameters: Dict[str, Any]) -> Dict[str, Any]:
+        """Apply FISTA deconvolution."""
+        try:
+            image_float = img_as_float(image_data)
+            iterations = parameters.get('iterations', 50)
+            lambda_reg = parameters.get('lambda_reg', 0.1)
+            psf = self._generate_psf(image_data.shape, parameters.get('psf_size', 5), parameters.get('psf_sigma', 1.0))
+
+            x_k = np.copy(image_float)
+            y_k = np.copy(image_float)
+            t_k = 1.0
+            psf_otf = fftn(np.fft.ifftshift(psf), s=image_float.shape)
+            psf_adj_otf = np.conj(psf_otf)
+            
+            for _ in range(iterations):
+                x_k_prev = np.copy(x_k)
+                t_k_prev = t_k
+
+                grad = ifftn(fftn(y_k) * psf_otf - fftn(image_float) * psf_otf, axes=image_float.shape).real
+                x_k = self._soft_threshold(y_k - grad, lambda_reg)
+                
+                t_k = (1 + np.sqrt(1 + 4 * t_k_prev**2)) / 2
+                y_k = x_k + ((t_k_prev - 1) / t_k) * (x_k - x_k_prev)
+            
+            enhanced = (np.clip(x_k, 0, 1) * (np.iinfo(image_data.dtype).max if np.issubdtype(image_data.dtype, np.integer) else 1)).astype(image_data.dtype)
+
+            return {'enhanced_image': enhanced, 'status': 'success'}
+        except Exception as e:
+            return {'status': 'error', 'message': f'FISTA deconvolution failed: {e}'}
+
+    def _apply_ista(self, image_data: np.ndarray, parameters: Dict[str, Any]) -> Dict[str, Any]:
+        """Apply ISTA deconvolution."""
+        try:
+            image_float = img_as_float(image_data)
+            iterations = parameters.get('iterations', 50)
+            lambda_reg = parameters.get('lambda_reg', 0.1)
+            psf = self._generate_psf(image_data.shape, parameters.get('psf_size', 5), parameters.get('psf_sigma', 1.0))
+
+            x_k = np.copy(image_float)
+            psf_otf = fftn(np.fft.ifftshift(psf), s=image_float.shape)
+
+            for _ in range(iterations):
+                grad = ifftn(fftn(x_k) * psf_otf - fftn(image_float), axes=image_float.shape).real
+                x_k = self._soft_threshold(x_k - grad, lambda_reg)
+            
+            enhanced = (np.clip(x_k, 0, 1) * (np.iinfo(image_data.dtype).max if np.issubdtype(image_data.dtype, np.integer) else 1)).astype(image_data.dtype)
+
+            return {'enhanced_image': enhanced, 'status': 'success'}
+        except Exception as e:
+            return {'status': 'error', 'message': f'ISTA deconvolution failed: {e}'}
+
+    def _apply_ictm(self, image_data: np.ndarray, parameters: Dict[str, Any]) -> Dict[str, Any]:
+        """Apply Iterative Constraint Tikhonov-Miller deconvolution."""
+        try:
+            image_float = img_as_float(image_data)
+            iterations = parameters.get('iterations', 30)
+            reg_param = parameters.get('reg_param', 0.01)
+            psf = self._generate_psf(image_data.shape, parameters.get('psf_size', 5), parameters.get('psf_sigma', 1.0))
+
+            x_k = np.copy(image_float)
+            psf_otf = fftn(np.fft.ifftshift(psf), s=image_float.shape)
+            psf_otf_conj = np.conj(psf_otf)
+            
+            for _ in range(iterations):
+                numerator = fftn(image_float) * psf_otf_conj
+                denominator = fftn(x_k) * psf_otf * psf_otf_conj + reg_param
+                x_k = ifftn(numerator / denominator, axes=image_float.shape).real
+                x_k = np.clip(x_k, 0, 1)
+
+            enhanced = (x_k * (np.iinfo(image_data.dtype).max if np.issubdtype(image_data.dtype, np.integer) else 1)).astype(image_data.dtype)
+            return {'enhanced_image': enhanced, 'status': 'success'}
+        except Exception as e:
+            return {'status': 'error', 'message': f'ICTM deconvolution failed: {e}'}
+
+    def _apply_nnls_deconvolution(self, image_data: np.ndarray, parameters: Dict[str, Any]) -> Dict[str, Any]:
+        """Apply Non-Negative Least Squares deconvolution."""
+        try:
+            image_flat = image_data.flatten()
+            psf_size = parameters.get('psf_size', 5)
+            psf_sigma = parameters.get('psf_sigma', 1.0)
+            psf = self._generate_psf(image_data.shape, psf_size, psf_sigma)
+
+            # Create the convolution matrix
+            from scipy.linalg import toeplitz
+            psf_flat = psf.flatten()
+            h, w = image_data.shape
+            A_rows = []
+            for i in range(h):
+                for j in range(w):
+                    row = np.zeros(h * w)
+                    for r in range(psf.shape[0]):
+                        for c in range(psf.shape[1]):
+                            if 0 <= i-r < h and 0 <= j-c < w:
+                                row[(i-r)*w + (j-c)] = psf[r,c]
+                    A_rows.append(row)
+            A = np.array(A_rows)
+            
+            # Solve using nnls
+            x, _ = nnls(A, image_flat)
+            enhanced_flat = x
+            enhanced = enhanced_flat.reshape(image_data.shape)
+            enhanced = (enhanced / enhanced.max() * (np.iinfo(image_data.dtype).max if np.issubdtype(image_data.dtype, np.integer) else 1)).astype(image_data.dtype)
+            return {'enhanced_image': enhanced, 'status': 'success'}
+        except Exception as e:
+            return {'status': 'error', 'message': f'NNLS deconvolution failed: {e}'}
 
     def _apply_noise2void(self, image_data: np.ndarray, 
                          parameters: Dict[str, Any]) -> Dict[str, Any]:
         """Apply Noise2Void-style self-supervised denoising using enhanced methods"""
         
         try:
-            # Enhanced non-local means as N2V substitute with proper dimension handling
             patch_size = parameters.get('patch_size', 7)
             patch_distance = parameters.get('patch_distance', 11)
             h = parameters.get('h', 0.1)
             
-            # Handle different image dimensions properly
             img_float = img_as_float(image_data)
             
-            if img_float.ndim == 2:
-                # 2D grayscale image
-                denoised = denoise_nl_means(
-                    img_float, 
-                    patch_size=patch_size,
-                    patch_distance=patch_distance,
-                    h=h * np.var(img_float),
-                        fast_mode=True,
-                        channel_axis=None
-                )
-            elif img_float.ndim == 3:
-                # Check if it's a time series (T, Y, X) or color image (Y, X, C)
-                if img_float.shape[2] <= 4:  # Likely color channels
-                    denoised = denoise_nl_means(
-                        img_float,
-                        patch_size=patch_size,
-                        patch_distance=patch_distance,
-                        h=h * np.var(img_float),
-                        fast_mode=True,
-                        channel_axis=2 if img_float.shape[2] in [3, 4] else None  # Apply only if channel dimension is present
-                    )
-                else:  # Likely time series or Z-stack
-                    # Process each frame individually
-                    denoised = np.zeros_like(img_float)
-                    for t in range(img_float.shape[0]):
-                        denoised[t] = denoise_nl_means(
-                            img_float[t],
-                            patch_size=patch_size,
-                            patch_distance=patch_distance,
-                            h=h * np.var(img_float[t]),
-                            fast_mode=True
-                        )
-            else:
-                # 4D or higher - process as 3D time series
-                denoised = np.zeros_like(img_float)
-                if img_float.ndim == 4:  # T, Y, X, C
-                    for t in range(img_float.shape[0]):
-                        denoised[t] = denoise_nl_means(
-                            img_float[t],
-                            patch_size=patch_size,
-                            patch_distance=patch_distance,
-                            h=h * np.var(img_float[t]),
-                            fast_mode=True,
-                            channel_axis=2 if img_float.shape[3] in [3, 4] else None  # Apply only if channel dimension is present
-                        )
-                else:
-                    # Fallback for higher dimensions
-                    denoised = img_float
+            denoised = denoise_nl_means(
+                img_float, 
+                patch_size=patch_size,
+                patch_distance=patch_distance,
+                h=h * np.var(img_float),
+                fast_mode=True,
+                channel_axis=-1 if image_data.ndim > 2 else None
+            )
             
-            # Calculate quality metrics
             noise_reduction = np.std(image_data) - np.std(denoised)
             snr_improvement = 20 * np.log10(np.std(denoised) / (np.std(image_data - denoised) + 1e-10))
             
+            enhanced = (denoised * (np.iinfo(image_data.dtype).max if np.issubdtype(image_data.dtype, np.integer) else 1)).astype(image_data.dtype)
+
             return {
                 'status': 'success',
-                'enhanced_image': denoised,
-                'noise_reduction': noise_reduction,
-                'snr_improvement_db': snr_improvement,
-                'parameters_used': parameters,
-                'method': 'Enhanced Non-Local Means (N2V-style)'
+                'enhanced_image': enhanced,
             }
             
         except Exception as e:
             return {
                 'status': 'error',
                 'message': f'Noise2Void-style denoising failed: {str(e)}',
-                'enhanced_image': image_data,
-                'parameters_used': parameters
             }
     
     def _apply_cellpose_segmentation(self, image_data: np.ndarray, 
@@ -400,15 +415,12 @@ class AIEnhancementManager:
             return {'status': 'error', 'message': 'Cellpose library required for AI segmentation'}
         
         try:
-            # Extract parameters
             diameter = parameters.get('diameter', None)
-            channels = parameters.get('channels', [0, 0])  # [cytoplasm, nucleus]
+            channels = parameters.get('channels', [0, 0])
             gpu = parameters.get('use_gpu', False)
             
-            # Initialize Cellpose model
             model = cellpose_models.Cellpose(model_type=model_type, gpu=gpu, torch=True)
             
-            # Run segmentation
             masks, flows, styles, diams = model.eval(
                 image_data, 
                 channels=channels, 
@@ -417,18 +429,6 @@ class AIEnhancementManager:
             
             return {
                 'segmentation_masks': masks,
-                'flows': flows,
-                'styles': styles,
-                'estimated_diameters': diams,
-                'original_image': image_data,
-                'method': f'Cellpose {model_type.capitalize()} Segmentation',
-                'parameters_used': {
-                    'model_type': model_type,
-                    'diameter': diameter,
-                    'channels': channels,
-                    'estimated_diameter': diams[0] if diams else None
-                },
-                'num_objects': len(np.unique(masks)) - 1,  # Exclude background
                 'status': 'success'
             }
             
@@ -443,40 +443,22 @@ class AIEnhancementManager:
             return {'status': 'error', 'message': 'StarDist library required for nucleus segmentation'}
         
         try:
-            # Extract parameters
             model_name = parameters.get('model_name', '2D_versatile_fluo')
             prob_thresh = parameters.get('prob_thresh', None)
             nms_thresh = parameters.get('nms_thresh', None)
             
-            # Normalize image as recommended by StarDist
-            image_float = img_as_float(image_data)
-            image_norm = stardist_normalize(image_float, 1, 99.8)
+            image_norm = stardist_normalize(img_as_float(image_data), 1, 99.8)
             
-            # Load pretrained model
             model = StarDist2D.from_pretrained(model_name)
             
-            # Run prediction
-            if prob_thresh is not None and nms_thresh is not None:
-                labels, details = model.predict_instances(
-                    image_norm, 
-                    prob_thresh=prob_thresh, 
-                    nms_thresh=nms_thresh
-                )
-            else:
-                labels, details = model.predict_instances(image_norm)
+            labels, details = model.predict_instances(
+                image_norm, 
+                prob_thresh=prob_thresh, 
+                nms_thresh=nms_thresh
+            )
             
             return {
                 'segmentation_masks': labels,
-                'detection_details': details,
-                'original_image': image_data,
-                'normalized_image': image_norm,
-                'method': 'StarDist Nucleus Segmentation',
-                'parameters_used': {
-                    'model_name': model_name,
-                    'prob_thresh': prob_thresh,
-                    'nms_thresh': nms_thresh
-                },
-                'num_nuclei': len(np.unique(labels)) - 1,  # Exclude background
                 'status': 'success'
             }
             
@@ -489,82 +471,64 @@ class AIEnhancementManager:
         if not AICS_SEGMENTATION_AVAILABLE:
             return {'status': 'error', 'message': 'AICS-Segmentation library required for AI segmentation'}
         try:
-            # Extract parameters
             model_name = parameters.get('model_name', 'General')
             
-            # Select workflow
-            if model_name == 'Lamin':
-                workflow = W_Lamin()
-            elif model_name == 'Myo':
-                workflow = W_Myo()
-            elif model_name == 'Sox':
-                workflow = W_Sox()
-            elif model_name == 'Membrane':
-                workflow = W_Membrane()
-            elif model_name == 'Sec61b':
-                workflow = W_Sec61b()
-            else:
-                workflow = W_General()
+            workflow_map = {
+                'Lamin': W_Lamin(),
+                'Myo': W_Myo(),
+                'Sox': W_Sox(),
+                'Membrane': W_Membrane(),
+                'Sec61b': W_Sec61b(),
+                'General': W_General()
+            }
+            workflow = workflow_map.get(model_name, W_General())
 
-            # Normalize image
             normalized_image = image_normalization(image_data)
-            
-            # Run segmentation
             segmentation_result = workflow.execute_flow(normalized_image)
             
             return {
                 'segmentation_masks': segmentation_result,
-                'original_image': image_data,
-                'method': f'AICS {model_name} Segmentation',
-                'parameters_used': {
-                    'model_name': model_name,
-                },
-                'num_objects': len(np.unique(segmentation_result)) - 1,
                 'status': 'success'
             }
         except Exception as e:
             return {'status': 'error', 'message': f'AICS segmentation failed: {str(e)}'}
 
-
 def get_enhancement_parameters(method: str) -> Dict[str, Any]:
     """Get default parameters for enhancement methods"""
     
-    if method == 'Non-local Means Denoising':
-        return {
-            'patch_size': 5,
-                'patch_distance': 6,
-            'fast_mode': True,
-            'auto_sigma': True,
-            'h': 0.1
-        }
-    elif method == 'Richardson-Lucy Deconvolution':
-        return {
-            'iterations': 30,
-            'psf_size': 5,
-            'psf_sigma': 1.0
-        }
-    elif method == 'Richardson-Lucy with Total Variation':
-        return {
-            'iterations': 10,
-            'lambda_tv': 0.002,
-            'psf_size': 5,
-            'psf_sigma': 1.0
-        }
-    elif method in ['Cellpose Cell Segmentation', 'Cellpose Nucleus Segmentation']:
-        return {
-            'diameter': 30,
-            'channels': [0, 0],
-            'use_gpu': False
-        }
-    elif method == 'StarDist Nucleus Segmentation':
-        return {
-            'model_name': '2D_versatile_fluo',
-            'prob_thresh': None,
-            'nms_thresh': None
-        }
-    elif method == 'AICS Cell Segmentation':
-        return {
+    defaults = {
+        'Non-local Means Denoising': {
+            'patch_size': 5, 'patch_distance': 6, 'fast_mode': True, 'auto_sigma': True, 'h': 0.1
+        },
+        'Richardson-Lucy Deconvolution': {
+            'iterations': 30, 'psf_size': 5, 'psf_sigma': 1.0
+        },
+        'Richardson-Lucy with Total Variation': {
+            'iterations': 10, 'lambda_tv': 0.002, 'psf_size': 5, 'psf_sigma': 1.0
+        },
+        'FISTA Deconvolution': {
+            'iterations': 50, 'lambda_reg': 0.05, 'psf_size': 5, 'psf_sigma': 1.0
+        },
+        'ISTA Deconvolution': {
+            'iterations': 50, 'lambda_reg': 0.05, 'psf_size': 5, 'psf_sigma': 1.0
+        },
+        'Iterative Constraint Tikhonov-Miller': {
+            'iterations': 30, 'reg_param': 0.01, 'psf_size': 5, 'psf_sigma': 1.0
+        },
+        'Non-negative Least Squares Deconvolution': {
+            'psf_size': 5, 'psf_sigma': 1.0
+        },
+        'Cellpose Cell Segmentation': {
+            'diameter': 30, 'channels': [0, 0], 'use_gpu': False
+        },
+        'Cellpose Nucleus Segmentation': {
+            'diameter': 30, 'channels': [0, 0], 'use_gpu': False
+        },
+        'StarDist Nucleus Segmentation': {
+            'model_name': '2D_versatile_fluo', 'prob_thresh': None, 'nms_thresh': None
+        },
+        'AICS Cell Segmentation': {
             'model_name': 'General'
         }
-    else:
-        return {}
+    }
+    return defaults.get(method, {})
