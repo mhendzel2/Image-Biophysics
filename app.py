@@ -56,6 +56,8 @@ batch_processing = safe_import('batch_processing', 'Batch Processing')
 number_and_brightness = safe_import('number_and_brightness', 'Number & Brightness')
 pair_correlation_function = safe_import('pair_correlation_function', 'Pair Correlation Function')
 population_analysis = safe_import('population_analysis', 'Population Analysis')
+statistics_analyzer = safe_import('statistics_analyzer', 'Statistics Analyzer')
+
 
 # Initialize session state
 def initialize_session_state():
@@ -120,12 +122,18 @@ def initialize_session_state():
             st.session_state.pcf_analyzer = pair_correlation_function.PairCorrelationFunction()
         else:
             st.session_state.pcf_analyzer = None
-
+        
         # Initialize Population analyzer
         if population_analysis is not None and hasattr(population_analysis, 'PopulationAnalyzer'):
             st.session_state.population_analyzer = population_analysis.PopulationAnalyzer()
         else:
             st.session_state.population_analyzer = None
+
+        # Initialize Statistics analyzer
+        if statistics_analyzer is not None and hasattr(statistics_analyzer, 'StatisticsAnalyzer'):
+            st.session_state.statistics_analyzer = statistics_analyzer.StatisticsAnalyzer()
+        else:
+            st.session_state.statistics_analyzer = None
 
 # Main application function
 def main():
@@ -180,7 +188,8 @@ def main():
             "Batch Processing": batch_processing is not None,
             "Number & Brightness": number_and_brightness is not None,
             "Pair Correlation Function": pair_correlation_function is not None,
-            "Population Analysis": population_analysis is not None
+            "Population Analysis": population_analysis is not None,
+            "Statistics Analyzer": statistics_analyzer is not None
         }
 
         for module, available in modules_status.items():
@@ -236,7 +245,7 @@ def show_home_page():
         - Image Correlation Spectroscopy (ICS)
         - Number & Brightness (N&B)
         - Pair Correlation Function (PCF)
-        - Population Analysis (Morphometry)
+        - Population Analysis (Morphometry, Statistics)
         ### AI Enhancement
         - Denoising (Non-local means, Richardson-Lucy)
         - Segmentation (Cellpose, StarDist)
@@ -250,7 +259,7 @@ def show_home_page():
         ### Getting Started
         1. **Load Data**: Navigate to 📁 Data Loading
         2. **Segment Objects**: Use `🎨 AI Enhancement` to generate a mask
-        3. **Population Analysis**: Go to `👥 Population Analysis` to extract features
+        3. **Population Analysis**: Go to `👥 Population Analysis` to extract features and perform statistical tests.
         4. **Analyze**: Choose other analysis methods
         5. **Export**: Generate reports and download results
         """)
@@ -345,8 +354,6 @@ def show_population_analysis_page():
 
     with controls_col:
         st.subheader("Controls")
-        st.info("A segmentation mask has been found. You can now run the population analysis.")
-
         if st.button("📈 Run Population Analysis", type="primary"):
             with st.spinner("Analyzing population features..."):
                 image_2d = st.session_state.image
@@ -369,7 +376,7 @@ def show_population_analysis_page():
         if st.session_state.get('population_data') is not None:
             df = st.session_state.population_data
             
-            tab1, tab2, tab3 = st.tabs(["Data Table", "Feature Distributions", "Correlation Plots"])
+            tab1, tab2, tab3, tab4 = st.tabs(["Data Table", "Feature Distributions", "Correlation Plots", "Statistical Comparison"])
 
             with tab1:
                 st.dataframe(df)
@@ -402,9 +409,90 @@ def show_population_analysis_page():
                         import plotly.express as px
                         fig = px.scatter(df, x=x_feat, y=y_feat, title=f'{y_feat} vs. {x_feat}', hover_data=['label'])
                         st.plotly_chart(fig, use_container_width=True)
+            
+            with tab4:
+                render_statistics_controls(df)
 
         else:
             st.info("Run the analysis to see the results.")
+
+
+def render_statistics_controls(df):
+    """Renders the controls for statistical analysis on a given dataframe."""
+    st.markdown("#### Group Comparison")
+
+    if 'group' not in df.columns:
+        df['group'] = 'Group 1' # Default group
+
+    # --- Group Assignment UI ---
+    st.markdown("**1. Assign Objects to Groups**")
+    group_name = st.text_input("New group name", "Group 2")
+    
+    # Logic to select objects - e.g., by label
+    all_labels = df['label'].unique().tolist()
+    labels_to_group = st.multiselect("Select object labels to assign to new group", options=all_labels)
+    
+    if st.button(f"Assign to {group_name}"):
+        df.loc[df['label'].isin(labels_to_group), 'group'] = group_name
+        st.success(f"Assigned {len(labels_to_group)} objects to {group_name}")
+
+    st.dataframe(df[['label', 'group']]) # Show current group assignments
+
+    # --- Statistical Test UI ---
+    st.markdown("**2. Perform Statistical Test**")
+    
+    groups_in_data = sorted(df['group'].unique().tolist())
+    if len(groups_in_data) < 2:
+        st.info("You need at least two groups to perform a statistical test.")
+        return
+
+    col1, col2 = st.columns(2)
+    with col1:
+        feature_to_test = st.selectbox("Select feature to test", options=[col for col in df.columns if col not in ['label', 'group']], index=0)
+    with col2:
+        test_type = st.selectbox("Select test type", ["T-test", "Mann-Whitney U", "ANOVA", "Kruskal-Wallis"])
+
+    # Filter for relevant groups
+    groups_to_compare = st.multiselect("Select groups to compare", options=groups_in_data, default=groups_in_data)
+
+    if st.button("🔬 Run Test"):
+        if len(groups_to_compare) < 2:
+            st.warning("Please select at least two groups to compare.")
+        elif st.session_state.statistics_analyzer and feature_to_test:
+            with st.spinner("Performing statistical test..."):
+                test_result = st.session_state.statistics_analyzer.perform_test(
+                    data=df[df['group'].isin(groups_to_compare)],
+                    feature=feature_to_test,
+                    groups=groups_to_compare,
+                    test_type=test_type
+                )
+
+                if test_result['status'] == 'success':
+                    st.session_state.test_result = test_result
+                    st.success("Test complete!")
+                else:
+                    st.error(f"Test failed: {test_result['message']}")
+
+    # --- Display Results ---
+    if 'test_result' in st.session_state and st.session_state.test_result:
+        res = st.session_state.test_result
+        if res['status'] == 'success':
+            st.metric(label=f"{test_type} Statistic", value=f"{res['statistic']:.4f}")
+            st.metric(label="P-value", value=f"{res['p_value']:.4f}")
+            
+            if res['p_value'] < 0.05:
+                st.success("The result is statistically significant (p < 0.05).")
+            else:
+                st.warning("The result is not statistically significant (p >= 0.05).")
+
+    # --- Visualization ---
+    st.markdown("**3. Visualize Comparison**")
+    if feature_to_test and len(groups_to_compare) > 1:
+        import plotly.express as px
+        fig = px.box(df[df['group'].isin(groups_to_compare)], x='group', y=feature_to_test, points="all",
+                     title=f'Comparison of {feature_to_test} across groups',
+                     labels={'group': 'Group', feature_to_test: feature_to_test})
+        st.plotly_chart(fig, use_container_width=True)
 
 
 def show_analysis_page():
@@ -494,25 +582,20 @@ def show_batch_processing_page():
     st.header("⚙️ Batch Processing")
     render_batch_controls()
 
-
 def render_batch_controls():
     """Renders controls for batch processing."""
     if not batch_processing:
         st.error("Batch processing module not available.")
         return
-    # ... (rest of the function is unchanged)
 
 def render_colocalization_controls(context='main'):
     """Renders controls for colocalization analysis."""
-    # ... (rest of the function is unchanged)
 
 def render_ai_enhancement_controls(context='main'):
     """Renders AI enhancement controls, adaptable for different contexts."""
-    # ... (rest of the function is unchanged, but now crucial for generating masks)
 
 def render_analysis_controls(context='main'):
     """Renders controls for analysis methods."""
-    # ... (rest of the function is unchanged)
 
 # Application entry point
 if __name__ == "__main__":
