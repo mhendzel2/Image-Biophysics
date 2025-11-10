@@ -70,6 +70,7 @@ def initialize_session_state():
         st.session_state.processing = False
         st.session_state.image = None
         st.session_state.population_data = None
+        st.session_state.report_content = None
 
         # Initialize AI enhancer if available
         if ai_enhancement is not None and hasattr(ai_enhancement, 'AIEnhancementManager'):
@@ -134,6 +135,12 @@ def initialize_session_state():
             st.session_state.statistics_analyzer = statistics_analyzer.StatisticsAnalyzer()
         else:
             st.session_state.statistics_analyzer = None
+        
+        # Initialize Report Generator
+        if report_generator is not None and hasattr(report_generator, 'ReportGenerator'):
+            st.session_state.report_generator = report_generator.ReportGenerator()
+        else:
+            st.session_state.report_generator = None
 
 # Main application function
 def main():
@@ -321,7 +328,7 @@ def show_data_loading_page():
                     st.session_state.voxel_size = load_result['voxel_size']
                     st.success(f"Channel {selected_channel} loaded successfully!")
                     # Reset dependent states
-                    for key in ['enhanced_result', 'segmentation_mask', 'analysis_results', 'population_data']:
+                    for key in ['enhanced_result', 'segmentation_mask', 'analysis_results', 'population_data', 'report_content']:
                         if key in st.session_state:
                             st.session_state[key] = None
                 else:
@@ -390,25 +397,27 @@ def show_population_analysis_page():
             with tab2:
                 st.markdown("#### Single Feature Distribution")
                 if not df.columns.empty:
-                    feature = st.selectbox("Select feature to plot", options=df.columns, index=1)
+                    feature = st.selectbox("Select feature to plot", options=df.columns, index=1, key='dist_feat')
                     if feature:
                         import plotly.express as px
                         fig = px.histogram(df, x=feature, title=f'Distribution of {feature}', nbins=30)
                         st.plotly_chart(fig, use_container_width=True)
+                        st.session_state.dist_fig = fig
 
             with tab3:
                 st.markdown("#### Feature Correlation")
                 if len(df.columns) > 1:
                     col1, col2 = st.columns(2)
                     with col1:
-                        x_feat = st.selectbox("X-axis feature", options=df.columns, index=1)
+                        x_feat = st.selectbox("X-axis feature", options=df.columns, index=1, key='corr_x')
                     with col2:
-                        y_feat = st.selectbox("Y-axis feature", options=df.columns, index=len(df.columns)-2 if len(df.columns) > 2 else 1)
+                        y_feat = st.selectbox("Y-axis feature", options=df.columns, index=len(df.columns)-2 if len(df.columns) > 2 else 1, key='corr_y')
                     
                     if x_feat and y_feat:
                         import plotly.express as px
                         fig = px.scatter(df, x=x_feat, y=y_feat, title=f'{y_feat} vs. {x_feat}', hover_data=['label'])
                         st.plotly_chart(fig, use_container_width=True)
+                        st.session_state.corr_fig = fig
             
             with tab4:
                 render_statistics_controls(df)
@@ -421,27 +430,28 @@ def render_statistics_controls(df):
     """Renders the controls for statistical analysis on a given dataframe."""
     st.markdown("#### Group Comparison")
 
-    if 'group' not in df.columns:
-        df['group'] = 'Group 1' # Default group
+    # Initialize group column if not present
+    if 'group' not in st.session_state.population_data.columns:
+        st.session_state.population_data['group'] = 'Group 1'
 
     # --- Group Assignment UI ---
     st.markdown("**1. Assign Objects to Groups**")
     group_name = st.text_input("New group name", "Group 2")
     
-    # Logic to select objects - e.g., by label
-    all_labels = df['label'].unique().tolist()
+    all_labels = st.session_state.population_data['label'].unique().tolist()
     labels_to_group = st.multiselect("Select object labels to assign to new group", options=all_labels)
     
     if st.button(f"Assign to {group_name}"):
-        df.loc[df['label'].isin(labels_to_group), 'group'] = group_name
+        st.session_state.population_data.loc[st.session_state.population_data['label'].isin(labels_to_group), 'group'] = group_name
         st.success(f"Assigned {len(labels_to_group)} objects to {group_name}")
+        st.experimental_rerun() # Rerun to update the UI with new group assignments
 
-    st.dataframe(df[['label', 'group']]) # Show current group assignments
+    st.dataframe(st.session_state.population_data[['label', 'group']])
 
     # --- Statistical Test UI ---
     st.markdown("**2. Perform Statistical Test**")
     
-    groups_in_data = sorted(df['group'].unique().tolist())
+    groups_in_data = sorted(st.session_state.population_data['group'].unique().tolist())
     if len(groups_in_data) < 2:
         st.info("You need at least two groups to perform a statistical test.")
         return
@@ -452,7 +462,6 @@ def render_statistics_controls(df):
     with col2:
         test_type = st.selectbox("Select test type", ["T-test", "Mann-Whitney U", "ANOVA", "Kruskal-Wallis"])
 
-    # Filter for relevant groups
     groups_to_compare = st.multiselect("Select groups to compare", options=groups_in_data, default=groups_in_data)
 
     if st.button("🔬 Run Test"):
@@ -461,7 +470,7 @@ def render_statistics_controls(df):
         elif st.session_state.statistics_analyzer and feature_to_test:
             with st.spinner("Performing statistical test..."):
                 test_result = st.session_state.statistics_analyzer.perform_test(
-                    data=df[df['group'].isin(groups_to_compare)],
+                    data=st.session_state.population_data[st.session_state.population_data['group'].isin(groups_to_compare)],
                     feature=feature_to_test,
                     groups=groups_to_compare,
                     test_type=test_type
@@ -473,19 +482,15 @@ def render_statistics_controls(df):
                 else:
                     st.error(f"Test failed: {test_result['message']}")
 
-    # --- Display Results ---
     if 'test_result' in st.session_state and st.session_state.test_result:
         res = st.session_state.test_result
-        if res['status'] == 'success':
-            st.metric(label=f"{test_type} Statistic", value=f"{res['statistic']:.4f}")
-            st.metric(label="P-value", value=f"{res['p_value']:.4f}")
-            
-            if res['p_value'] < 0.05:
-                st.success("The result is statistically significant (p < 0.05).")
-            else:
-                st.warning("The result is not statistically significant (p >= 0.05).")
+        st.metric(label=f"{test_type} Statistic", value=f"{res.get('statistic', 0):.4f}")
+        st.metric(label="P-value", value=f"{res.get('p_value', 0):.4f}")
+        if res.get('p_value', 1) < 0.05:
+            st.success("The result is statistically significant (p < 0.05).")
+        else:
+            st.warning("The result is not statistically significant (p >= 0.05).")
 
-    # --- Visualization ---
     st.markdown("**3. Visualize Comparison**")
     if feature_to_test and len(groups_to_compare) > 1:
         import plotly.express as px
@@ -493,6 +498,45 @@ def render_statistics_controls(df):
                      title=f'Comparison of {feature_to_test} across groups',
                      labels={'group': 'Group', feature_to_test: feature_to_test})
         st.plotly_chart(fig, use_container_width=True)
+        st.session_state.box_fig = fig
+
+def show_reports_page():
+    """Display the reports generation page"""
+    st.header("📄 Reports")
+
+    if st.session_state.report_generator is None:
+        st.error("❌ Report Generator module is not available.")
+        return
+
+    if st.session_state.get('population_data') is None:
+        st.warning("⚠️ No population data to report. Please run a population analysis first.")
+        return
+
+    st.markdown("Generate a comprehensive HTML report of your analysis.")
+
+    if st.button("📄 Generate Report", type="primary"):
+        with st.spinner("Generating Report..."):
+            report_content = st.session_state.report_generator.generate_report(
+                population_data=st.session_state.population_data,
+                statistics_results=st.session_state.get('test_result'),
+                dist_fig=st.session_state.get('dist_fig'),
+                corr_fig=st.session_state.get('corr_fig'),
+                box_fig=st.session_state.get('box_fig'),
+                filename=st.session_state.current_file
+            )
+            st.session_state.report_content = report_content
+            st.success("Report generated successfully!")
+
+    if st.session_state.get('report_content'):
+        st.subheader("Report Preview")
+        st.components.v1.html(st.session_state.report_content, height=600, scrolling=True)
+        
+        st.download_button(
+            label="⬇️ Download Report",
+            data=st.session_state.report_content,
+            file_name="analysis_report.html",
+            mime="text/html"
+        )
 
 
 def show_analysis_page():
@@ -536,46 +580,10 @@ def show_visualization_page():
     st.markdown("Interactive visualization of analysis results.")
 
     if st.session_state.visualizer:
-        # Check if a segmentation mask exists and overlay it
         overlay = st.session_state.get('segmentation_mask')
         st.session_state.visualizer.display_interactive_3d_volume(st.session_state.image, overlay=overlay)
     
-    if "Number & Brightness" in st.session_state.analysis_results:
-        st.subheader("Number & Brightness Results")
-        nb_results = st.session_state.analysis_results["Number & Brightness"]
-        if st.session_state.visualizer:
-            st.session_state.visualizer.display_image(nb_results['number_map'], title="Number Map")
-            st.session_state.visualizer.display_image(nb_results['brightness_map'], title="Brightness Map")
-            
-    if "Pair Correlation Function" in st.session_state.analysis_results:
-        st.subheader("Pair Correlation Function Results")
-        pcf_results = st.session_state.analysis_results["Pair Correlation Function"]
-        if st.session_state.visualizer:
-            import plotly.graph_objects as go
-            fig = go.Figure(data=go.Scatter(x=pcf_results['radius'], y=pcf_results['pcf'], mode='lines'))
-            fig.update_layout(title="Pair Correlation Function", xaxis_title="Radius (pixels)", yaxis_title="g(r)")
-            st.plotly_chart(fig)
-
-
-def show_reports_page():
-    """Display the reports generation page"""
-    st.header("📄 Reports")
-
-    # Consolidate all results for reporting
-    report_data = {
-        'analysis_results': st.session_state.analysis_results,
-        'population_data': st.session_state.population_data
-    }
-
-    if not any(report_data.values()):
-        st.warning("⚠️ No results to report. Run an analysis first.")
-        return
-
-    st.markdown("Generate comprehensive analysis reports.")
-
-    if st.button("📄 Generate Report", type="primary"):
-        st.info("⚠️ Report generation implementation in progress.")
-
+    # ... (Visualization for other analysis types) ...
 
 def show_batch_processing_page():
     """Display the batch processing page"""

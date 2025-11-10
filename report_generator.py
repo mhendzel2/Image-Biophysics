@@ -1,233 +1,147 @@
 """
-Automated Report Generation Module
-Creates comprehensive analysis reports based on imported data and results
+Report Generator Module
+
+This module provides a class to generate HTML reports from analysis data,
+including population statistics, plots, and statistical test results.
 """
 
-import numpy as np
 import pandas as pd
-from datetime import datetime
-from typing import Dict, Any, List, Optional
-import json
-import io
-from pathlib import Path
+from typing import Dict, Any, Optional
 
-try:
-    import matplotlib.pyplot as plt
-    import matplotlib.patches as patches
-    from matplotlib.backends.backend_pdf import PdfPages
-    MATPLOTLIB_AVAILABLE = True
-except ImportError:
-    MATPLOTLIB_AVAILABLE = False
+class ReportGenerator:
+    """
+    Generates an HTML report from population and statistical analysis results.
+    """
 
-try:
-    from reportlab.lib.pagesizes import letter, A4
-    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Image, Table, TableStyle
-    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-    from reportlab.lib.units import inch
-    from reportlab.lib import colors
-    REPORTLAB_AVAILABLE = True
-except ImportError:
-    REPORTLAB_AVAILABLE = False
+    def generate_report(
+        self,
+        population_data: pd.DataFrame,
+        statistics_results: Optional[Dict[str, Any]] = None,
+        dist_fig: Optional[Any] = None,
+        corr_fig: Optional[Any] = None,
+        box_fig: Optional[Any] = None,
+        filename: str = "report.html"
+    ) -> str:
+        """
+        Generates a complete HTML report.
 
-class AutomatedReportGenerator:
-    """Generates comprehensive analysis reports based on data and results"""
+        Args:
+            population_data (pd.DataFrame): DataFrame with morphometric data.
+            statistics_results (Optional[Dict[str, Any]]): Results from StatisticsAnalyzer.
+            dist_fig (Optional[Any]): Plotly figure for distribution.
+            corr_fig (Optional[Any]): Plotly figure for correlation.
+            box_fig (Optional[Any]): Plotly figure for box plot comparison.
+            filename (str): The name of the original file being analyzed.
 
-    def __init__(self):
-        self.report_templates = {
-            'microscopy_analysis': self._generate_microscopy_report,
-            'fcs_analysis': self._generate_fcs_report,
-            'specialized_physics': self._generate_physics_report,
-            'ai_enhancement': self._generate_ai_report,
-            'comprehensive': self._generate_comprehensive_report
-        }
+        Returns:
+            str: The complete HTML content of the report.
+        """
+        # --- 1. HTML Template ---
+        html_template = """
+        <!DOCTYPE html>
+        <html lang="en">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Analysis Report</title>
+            <style>
+                body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0 auto; max-width: 1000px; padding: 20px; }}
+                h1, h2, h3 {{ color: #333; }}
+                .section {{ margin-bottom: 40px; border-bottom: 1px solid #eee; padding-bottom: 20px; }}
+                .dataframe {{ border-collapse: collapse; width: 100%; }}
+                .dataframe th, .dataframe td {{ text-align: left; padding: 8px; border: 1px solid #ddd; }}
+                .dataframe th {{ background-color: #f2f2f2; }}
+                .metric-box {{ display: inline-block; padding: 10px 20px; border: 1px solid #ccc; border-radius: 5px; margin-right: 15px; text-align: center;}}
+                .metric-box .label {{ font-size: 0.9em; color: #666; }}
+                .metric-box .value {{ font-size: 1.5em; font-weight: bold; }}
+                .plot {{ margin-top: 20px; }}
+            </style>
+            <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+        </head>
+        <body>
+            <h1>Analysis Report</h1>
+            <div class="section">
+                <h2>Metadata</h2>
+                <p><strong>Source File:</strong> {filename}</p>
+                <p><strong>Report Generated:</strong> {generation_date}</p>
+            </div>
 
-    def generate_report(self, data_info: Dict[str, Any], analysis_results: Dict[str, Any],
-                       specialized_results: Dict[str, Any], enhanced_data: Any = None,
-                       report_type: str = 'comprehensive') -> Dict[str, Any]:
-        """Generate automated report based on data and results"""
+            <div class="section">
+                <h2>Statistical Comparison</h2>
+                {statistics_section}
+            </div>
 
-        report_data = {
-            'metadata': self._extract_metadata(data_info),
-            'data_summary': self._analyze_data_characteristics(data_info),
-            'analysis_summary': self._summarize_analysis_results(analysis_results),
-            'specialized_summary': self._summarize_specialized_results(specialized_results),
-            'recommendations': self._generate_recommendations(data_info, analysis_results, specialized_results),
-            'timestamp': datetime.now().isoformat()
-        }
+            <div class="section">
+                <h2>Data Summary</h2>
+                <p><strong>Total Objects Analyzed:</strong> {total_objects}</p>
+                {population_table}
+            </div>
 
-        # Generate report content based on type
-        if report_type in self.report_templates:
-            report_content = self.report_templates[report_type](report_data, data_info, analysis_results, specialized_results)
-        else:
-            report_content = self._generate_comprehensive_report(report_data, data_info, analysis_results, specialized_results)
+            <div class="section">
+                <h2>Visualizations</h2>
+                <h3>Group Comparison</h3>
+                {box_plot}
+                <h3>Feature Distributions</h3>
+                {dist_plot}
+                <h3>Feature Correlations</h3>
+                {corr_plot}
+            </div>
 
-        return {
-            'report_data': report_data,
-            'report_content': report_content,
-            'report_type': report_type,
-            'generation_time': datetime.now().isoformat()
-        }
+            <footer>
+                <p><em>Report generated by the Advanced Image Biophysics Platform.</em></p>
+            </footer>
+        </body>
+        </html>
+        """
 
-    def _extract_metadata(self, data_info: Dict[str, Any]) -> Dict[str, Any]:
-        """Extract and organize metadata from data"""
-        metadata = {
-            'filename': data_info.get('filename', 'Unknown'),
-            'format': data_info.get('format', 'Unknown'),
-            'data_type': data_info.get('data_type', 'Unknown'),
-            'dimensions': str(data_info.get('shape', 'Unknown')),
-            'pixel_size': data_info.get('pixel_size', 'Unknown'),
-            'time_points': data_info.get('time_points', 'Unknown'),
-            'channels': data_info.get('channels', 'Unknown'),
-            'channel_names': data_info.get('channel_names', []),
-            'acquisition_date': data_info.get('acquisition_date', 'Unknown'),
-            'microscope_type': self._infer_microscope_type(data_info.get('format', '')),
-            'file_size': data_info.get('file_size', 'Unknown')
-        }
+        # --- 2. Prepare Content ---
+        from datetime import datetime
+        generation_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        # Add computed metrics
-        if data_info.get('shape'):
-            shape = data_info['shape']
-            if len(shape) >= 2:
-                metadata['total_pixels'] = shape[-1] * shape[-2]
-                if len(shape) >= 3:
-                    metadata['total_frames'] = shape[0]
-                    metadata['dataset_size'] = f"{shape[0]} × {shape[-2]} × {shape[-1]}"
+        # Population data
+        total_objects = len(population_data)
+        population_table = population_data.to_html(classes='dataframe', index=False)
 
-        return metadata
+        # Statistics section
+        stats_html = "<p>No statistical tests were performed.</p>"
+        if statistics_results and statistics_results.get('status') == 'success':
+            p_val = statistics_results['p_value']
+            stat_val = statistics_results['statistic']
+            significance = "Statistically Significant (p < 0.05)" if p_val < 0.05 else "Not Statistically Significant (p >= 0.05)"
+            
+            stats_html = f"""
+            <div class="metric-box">
+                <div class="label">P-value</div>
+                <div class="value">{p_val:.4f}</div>
+            </div>
+            <div class="metric-box">
+                <div class="label">Test Statistic</div>
+                <div class="value">{stat_val:.4f}</div>
+            </div>
+            <h3>Conclusion: {significance}</h3>
+            """
+            
+        # Plots
+        def get_plot_html(fig):
+            if fig is None:
+                return "<p>Plot not generated.</p>"
+            return fig.to_html(full_html=False, include_plotlyjs=False)
 
-    def _analyze_data_characteristics(self, data_info: Dict[str, Any]) -> Dict[str, Any]:
-        """Analyze data characteristics and quality metrics"""
-        characteristics = {}
-        return characteristics
+        box_plot_html = get_plot_html(box_fig)
+        dist_plot_html = get_plot_html(dist_fig)
+corr_plot_html = get_plot_html(corr_fig)
 
-    def _summarize_analysis_results(self, analysis_results: Dict[str, Any]) -> Dict[str, Any]:
-        """Summarize analysis results"""
-        summary = {}
-        return summary
 
-    def _summarize_specialized_results(self, specialized_results: Dict[str, Any]) -> Dict[str, Any]:
-        """Summarize specialized results"""
-        summary = {}
-        return summary
+        # --- 3. Format Final HTML ---
+        report_content = html_template.format(
+            filename=filename,
+            generation_date=generation_date,
+            statistics_section=stats_html,
+            total_objects=total_objects,
+            population_table=population_table,
+            box_plot=box_plot_html,
+            dist_plot=dist_plot_html,
+            corr_plot=corr_plot_html
+        )
 
-    def _generate_recommendations(self, data_info: Dict[str, Any], 
-                                 analysis_results: Dict[str, Any],
-                                 specialized_results: Dict[str, Any]) -> List[str]:
-        """Generate recommendations based on analysis"""
-        recommendations = []
-        return recommendations
-
-    def _infer_microscope_type(self, format_str: str) -> str:
-        """Infer microscope type from format"""
-        if 'czi' in format_str.lower():
-            return 'Zeiss Confocal'
-        elif 'lif' in format_str.lower():
-            return 'Leica Confocal'
-        elif 'nd2' in format_str.lower():
-            return 'Nikon'
-        elif 'oib' in format_str.lower() or 'oif' in format_str.lower():
-            return 'Olympus'
-        return 'Unknown'
-
-    def _generate_microscopy_report(self, report_data: Dict[str, Any], 
-                                    data_info: Dict[str, Any], 
-                                    analysis_results: Dict[str, Any], 
-                                    specialized_results: Dict[str, Any]) -> str:
-        """Generate microscopy-focused report"""
-        content = ["# Microscopy Analysis Report\n\n"]
-        content.append(f"**Generated:** {report_data['timestamp']}\n\n")
-        return "".join(content)
-
-    def _generate_fcs_report(self, report_data: Dict[str, Any], 
-                            data_info: Dict[str, Any], 
-                            analysis_results: Dict[str, Any], 
-                            specialized_results: Dict[str, Any]) -> str:
-        """Generate FCS-focused report"""
-        content = ["# FCS Analysis Report\n\n"]
-        content.append(f"**Generated:** {report_data['timestamp']}\n\n")
-        return "".join(content)
-
-    def _generate_physics_report(self, report_data: Dict[str, Any], 
-                                data_info: Dict[str, Any], 
-                                analysis_results: Dict[str, Any], 
-                                specialized_results: Dict[str, Any]) -> str:
-        """Generate physics-focused report"""
-        content = ["# Specialized Physics Analysis Report\n\n"]
-        content.append(f"**Generated:** {report_data['timestamp']}\n\n")
-        return "".join(content)
-
-    def _generate_ai_report(self, report_data: Dict[str, Any], 
-                           data_info: Dict[str, Any], 
-                           analysis_results: Dict[str, Any], 
-                           specialized_results: Dict[str, Any]) -> str:
-        """Generate AI enhancement report"""
-        content = ["# AI Enhancement Report\n\n"]
-        content.append(f"**Generated:** {report_data['timestamp']}\n\n")
-        return "".join(content)
-
-    def _generate_comprehensive_report(self, report_data: Dict[str, Any], 
-                                     data_info: Dict[str, Any], 
-                                     analysis_results: Dict[str, Any], 
-                                     specialized_results: Dict[str, Any]) -> str:
-        """Generate comprehensive analysis report with more detail."""
-        content = []
-        
-        # Header and metadata
-        content.append("# Comprehensive Analysis Report\n\n")
-        content.append(f"**Generated:** {report_data['timestamp']}\n\n")
-        
-        # Metadata section
-        if 'metadata' in report_data:
-            content.append("## File Metadata\n\n")
-            metadata = report_data['metadata']
-            for key, value in metadata.items():
-                content.append(f"- **{key}**: {value}\n")
-            content.append("\n")
-
-        # Segmented FCS section if present
-        if 'Segmented FCS' in analysis_results:
-            seg_result = analysis_results['Segmented FCS']
-            if isinstance(seg_result, dict) and seg_result.get('status') == 'success':
-                segments_df = seg_result.get('segments')
-                content.append("## Segmented FCS\n")
-                content.append(f"Computed {seg_result.get('n_segments', 0)} segments. ")
-                content.append(f"Median D: {seg_result.get('median_D_um2_s', 0):.4g} µm²/s | ")
-                content.append(f"Median τD: {seg_result.get('median_tauD_s', 0):.4g} s | ")
-                content.append(f"Median N: {seg_result.get('median_N_est', 0):.3g}\n\n")
-                try:
-                    # Include compact CSV (first few lines) for readability
-                    if hasattr(segments_df, 'head'):
-                        csv_preview = segments_df.head(10).to_csv(index=False)
-                        content.append("Segment Summary (first 10):\n")
-                        content.append("```\n" + csv_preview + "```\n")
-                except Exception:
-                    pass
-        
-        # Analysis results section
-        if analysis_results:
-            content.append("## Analysis Results\n\n")
-            for method, result in analysis_results.items():
-                if method != 'Segmented FCS':  # Already handled above
-                    content.append(f"### {method}\n")
-                    if isinstance(result, dict):
-                        for key, value in result.items():
-                            content.append(f"- **{key}**: {value}\n")
-                    else:
-                        content.append(f"{result}\n")
-                    content.append("\n")
-        
-        # Specialized results section
-        if specialized_results:
-            content.append("## Specialized Analysis\n\n")
-            for key, value in specialized_results.items():
-                content.append(f"### {key}\n")
-                content.append(f"{value}\n\n")
-        
-        # Recommendations
-        if 'recommendations' in report_data and report_data['recommendations']:
-            content.append("## Recommendations\n\n")
-            for rec in report_data['recommendations']:
-                content.append(f"- {rec}\n")
-            content.append("\n")
-        
-        return "".join(content)
+        return report_content
