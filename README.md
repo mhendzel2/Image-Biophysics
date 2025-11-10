@@ -17,6 +17,8 @@ A comprehensive Streamlit-based application for microscopy data analysis, featur
 - **Single Particle Tracking (SPT)**: Trackpy-based particle tracking
 - **Optical Flow Analysis**: Lucas-Kanade, Farneback, DIC, phase correlation
 - **Image Correlation Spectroscopy (ICS)**: RICS, STICS, imaging FCS, pair correlation
+- **Number & Brightness (N&B) Analysis**: Determine molecular brightness and concentration.
+- **Pair Correlation Function (PCF) Analysis**: Quantify spatial clustering of molecules.
 
 ### AI Enhancement
 - **Denoising**: Non-local means, Richardson-Lucy deconvolution
@@ -103,6 +105,8 @@ Access the application at `http://localhost:5000`
 - `analysis_modules.py` - Biophysical analysis methods
 - `ai_enhancement.py` - AI-powered enhancement tools
 - `advanced_analysis.py` - Specialized physics methods
+- `number_and_brightness.py` - N&B analysis
+- `pair_correlation_function.py` - PCF analysis
 
 ### Specialized Features
 - `optical_flow_analysis.py` - Elastography and flow analysis
@@ -148,6 +152,8 @@ advanced-image-biophysics/
 ├── thumbnail_generator.py              # Preview system
 ├── report_generator.py                 # Automated reports
 ├── fcs_data_loader.py                  # FCS support
+├── number_and_brightness.py            # N&B analysis
+├── pair_correlation_function.py        # PCF analysis
 ├── visualization.py                    # Plotting
 ├── utils.py                           # Utilities
 ├── requirements.txt                    # Dependencies

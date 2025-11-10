@@ -53,6 +53,9 @@ image_correlation_spectroscopy = safe_import('image_correlation_spectroscopy', '
 nuclear_biophysics = safe_import('nuclear_biophysics', 'Nuclear Biophysics')
 thumbnail_generator = safe_import('thumbnail_generator', 'Thumbnail Generator')
 batch_processing = safe_import('batch_processing', 'Batch Processing')
+number_and_brightness = safe_import('number_and_brightness', 'Number & Brightness')
+pair_correlation_function = safe_import('pair_correlation_function', 'Pair Correlation Function')
+
 
 # Initialize session state
 def initialize_session_state():
@@ -63,6 +66,8 @@ def initialize_session_state():
         st.session_state.analysis_results = {}
         st.session_state.current_file = None
         st.session_state.processing = False
+        st.session_state.image = None
+
 
         # Initialize AI enhancer if available
         if ai_enhancement is not None and hasattr(ai_enhancement, 'AIEnhancementManager'):
@@ -104,6 +109,17 @@ def initialize_session_state():
         else:
             st.session_state.analyzer = None
 
+        # Initialize N&B analyzer
+        if number_and_brightness is not None and hasattr(number_and_brightness, 'NumberAndBrightness'):
+            st.session_state.nb_analyzer = number_and_brightness.NumberAndBrightness()
+        else:
+            st.session_state.nb_analyzer = None
+
+        # Initialize PCF analyzer
+        if pair_correlation_function is not None and hasattr(pair_correlation_function, 'PairCorrelationFunction'):
+            st.session_state.pcf_analyzer = pair_correlation_function.PairCorrelationFunction()
+        else:
+            st.session_state.pcf_analyzer = None
 
 # Main application function
 def main():
@@ -154,7 +170,9 @@ def main():
             "Optical Flow": optical_flow_analysis is not None,
             "ICS": image_correlation_spectroscopy is not None,
             "Nuclear Biophysics": nuclear_biophysics is not None,
-            "Batch Processing": batch_processing is not None
+            "Batch Processing": batch_processing is not None,
+            "Number & Brightness": number_and_brightness is not None,
+            "Pair Correlation Function": pair_correlation_function is not None
         }
 
         for module, available in modules_status.items():
@@ -199,7 +217,6 @@ def show_home_page():
         - Real-time thumbnails
         - FCS data support
         - Automatic format detection
-
         ### Analysis Methods
         - Fluorescence Correlation Spectroscopy (FCS)
         - Raster Image Correlation Spectroscopy (RICS)
@@ -207,7 +224,8 @@ def show_home_page():
         - Single Particle Tracking (SPT)
         - Optical Flow Analysis
         - Image Correlation Spectroscopy (ICS)
-
+        - Number & Brightness (N&B)
+        - Pair Correlation Function (PCF)
         ### AI Enhancement
         - Denoising (Non-local means, Richardson-Lucy)
         - Segmentation (Cellpose, StarDist)
@@ -225,14 +243,12 @@ def show_home_page():
         4. **Analyze**: Choose analysis method
         5. **Enhance**: Apply AI-powered enhancements
         6. **Export**: Generate reports and download results
-
         ### Supported Formats
         - **TIFF/STK**: MetaMorph, Leica, Olympus
         - **CZI**: Zeiss LSM 700, Elyra 7
         - **LIF**: Leica SP8
         - **OIF/OIB**: Olympus imaging
         - **FCS**: Correlation spectroscopy data
-
         ### Tips
         - Start with Data Loading page
         - Preview files before analysis
@@ -319,6 +335,7 @@ def show_analysis_page():
 
     st.markdown("Select and configure analysis methods for your data.")
 
+    render_analysis_controls()
     render_colocalization_controls()
 
 def show_ai_enhancement_page():
@@ -350,6 +367,23 @@ def show_visualization_page():
 
     if st.session_state.visualizer:
         st.session_state.visualizer.display_interactive_3d_volume(st.session_state.image)
+    
+    if "Number & Brightness" in st.session_state.analysis_results:
+        st.subheader("Number & Brightness Results")
+        nb_results = st.session_state.analysis_results["Number & Brightness"]
+        if st.session_state.visualizer:
+            st.session_state.visualizer.display_image(nb_results['number_map'], title="Number Map")
+            st.session_state.visualizer.display_image(nb_results['brightness_map'], title="Brightness Map")
+            
+    if "Pair Correlation Function" in st.session_state.analysis_results:
+        st.subheader("Pair Correlation Function Results")
+        pcf_results = st.session_state.analysis_results["Pair Correlation Function"]
+        if st.session_state.visualizer:
+            import plotly.graph_objects as go
+            fig = go.Figure(data=go.Scatter(x=pcf_results['radius'], y=pcf_results['pcf'], mode='lines'))
+            fig.update_layout(title="Pair Correlation Function", xaxis_title="Radius (pixels)", yaxis_title="g(r)")
+            st.plotly_chart(fig)
+
 
 def show_reports_page():
     """Display the reports generation page"""
@@ -554,6 +588,55 @@ def render_ai_enhancement_controls(context='main'):
                     st.error(f"Enhancement failed: {result.get('message', 'Unknown error')}")
         else:
             st.warning("Please load an image before applying enhancement.")
+
+
+def render_analysis_controls(context='main'):
+    """Renders controls for analysis methods."""
+    key_prefix = f"analysis_{context}"
+
+    analysis_methods = ["Number & Brightness", "Pair Correlation Function"]
+    
+    analysis_method = st.selectbox(
+        "Select Analysis Method",
+        analysis_methods,
+        key=f"{key_prefix}_method"
+    )
+
+    params = {}
+    if analysis_method == "Number & Brightness":
+        st.subheader("N&B Parameters")
+        params['window_size'] = st.slider("Window Size", min_value=8, max_value=128, value=32, step=8, key=f"{key_prefix}_nb_window_size")
+    elif analysis_method == "Pair Correlation Function":
+        st.subheader("PCF Parameters")
+        params['max_radius'] = st.slider("Max Radius", min_value=10, max_value=200, value=50, step=10, key=f"{key_prefix}_pcf_max_radius")
+
+    if st.button("📈 Run Analysis", key=f"{key_prefix}_run"):
+        if st.session_state.image is None:
+            st.warning("Please load an image first.")
+            return
+
+        with st.spinner(f"Running {analysis_method}..."):
+            results = None
+            if analysis_method == "Number & Brightness":
+                if st.session_state.nb_analyzer:
+                    results = st.session_state.nb_analyzer.analyze(st.session_state.image, **params)
+            elif analysis_method == "Pair Correlation Function":
+                if st.session_state.pcf_analyzer:
+                    # PCF works on 2D images. If we have a 3D stack, we analyze the mean projection.
+                    image_2d = st.session_state.image
+                    if image_2d.ndim == 3:
+                        image_2d = np.mean(image_2d, axis=0)
+                    results = st.session_state.pcf_analyzer.analyze(image_2d, **params)
+
+            if results and results['status'] == 'success':
+                st.session_state.analysis_results[analysis_method] = results
+                st.success(f"{analysis_method} analysis complete!")
+            elif results:
+                st.error(f"Analysis failed: {results['message']}")
+            else:
+                st.error("Analysis could not be performed.")
+
+
 
 # Application entry point
 if __name__ == "__main__":
