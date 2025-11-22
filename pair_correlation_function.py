@@ -44,33 +44,77 @@ class PairCorrelationFunction:
             return {'status': 'error', 'message': 'Input must be a 2D image.'}
 
         # Normalize the image by its mean
+        # g(r) - 1 = <dI(x) dI(x+r)> / <I>^2
+
         mean_intensity = np.mean(image)
         if mean_intensity == 0:
             return {'status': 'error', 'message': 'Image mean is zero, cannot calculate PCF.'}
-        normalized_image = image / mean_intensity - 1
-
-        # Calculate the autocorrelation using FFT
-        autocorr = fftconvolve(normalized_image, normalized_image[::-1, ::-1], mode='same')
         
-        # Get the dimensions of the autocorrelation image
-        height, width = autocorr.shape
-        center_y, center_x = height // 2, width // 2
+        # Fluctuation image normalized by mean
+        normalized_image = (image - mean_intensity) / mean_intensity
+
+        # Calculate the autocorrelation of fluctuations using FFT
+        # fftconvolve returns sum(norm[i] * norm[i+r])
+        # We need to divide by the number of overlapping pixels for each lag r
+
+        # Standard fftconvolve with 'same' uses zero-padding, so edges are affected.
+        # To get proper normalization, we also convolve a mask of ones.
+
+        # 1. Autocorrelation of normalized fluctuations (numerator sum)
+        autocorr_sum = fftconvolve(normalized_image, normalized_image[::-1, ::-1], mode='full')
+
+        # 2. Autocorrelation of the window/mask (denominator count)
+        mask = np.ones_like(normalized_image)
+        overlap_count = fftconvolve(mask, mask[::-1, ::-1], mode='full')
+
+        # Avoid division by zero
+        overlap_count[overlap_count < 1] = 1
+
+        # Normalized autocorrelation map
+        autocorr_map = autocorr_sum / overlap_count
+
+        # Extract the center part corresponding to lags
+        # For mode='full', the center is at (H-1, W-1) if shape is (H,W)
+        h, w = normalized_image.shape
+        center_y, center_x = h - 1, w - 1
 
         # Radial averaging
-        y, x = np.indices((height, width))
-        r = np.sqrt((x - center_x)**2 + (y - center_y)**2)
-        r = r.astype(int)
+        # Create a grid of radii corresponding to the full correlation map
+        y, x = np.indices(autocorr_map.shape)
+        r_grid = np.sqrt((x - center_x)**2 + (y - center_y)**2)
+
+        # We only care about integer radii
+        r_int = np.round(r_grid).astype(int)
+
+        # Limit to max_radius
+        mask_radius = r_int <= max_radius
         
         # Bin the autocorrelation values by radius
-        tbin = np.bincount(r.ravel(), autocorr.ravel())
-        nr = np.bincount(r.ravel())
+        # Use bincount for efficiency
         
-        # Avoid division by zero
-        radial_profile = tbin / np.where(nr == 0, 1, nr)
+        # Flatten masked arrays
+        r_values = r_int[mask_radius]
+        corr_values = autocorr_map[mask_radius]
 
-        # The PCF is the radial profile of the normalized autocorrelation
-        pcf = radial_profile[:max_radius] + 1
-        radius = np.arange(max_radius)
+        # Sum of correlations for each radius bin
+        tbin = np.bincount(r_values, weights=corr_values)
+        # Count of pixels in each radius bin
+        nr = np.bincount(r_values)
+
+        # Calculate radial profile (average)
+        # Handle cases where nr might be 0 (though unlikely for small radii)
+        valid_bins = nr > 0
+        radial_profile = np.zeros_like(tbin, dtype=float)
+        radial_profile[valid_bins] = tbin[valid_bins] / nr[valid_bins]
+
+        # The result is g(r) - 1. So add 1 to get g(r).
+        pcf = radial_profile + 1
+
+        # Crop to max_radius (bincount might go slightly larger due to rounding)
+        if len(pcf) > max_radius + 1:
+            pcf = pcf[:max_radius + 1]
+
+        radius = np.arange(len(pcf))
 
         return {
             'status': 'success',

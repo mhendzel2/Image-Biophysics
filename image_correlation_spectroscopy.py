@@ -89,26 +89,42 @@ class ImageCorrelationSpectroscopy:
             
             T, H, W = image_data.shape
             
-            # Calculate RICS correlation function
-            rics_correlation = self._calculate_rics_correlation(
+            # Calculate mean intensity and variance
+            avg_intensity = np.mean(image_data)
+            intensity_variance = np.var(image_data)
+
+            if avg_intensity == 0:
+                 return {'status': 'error', 'message': 'Average intensity is zero.'}
+
+            # Calculate RICS correlation function (unnormalized covariance)
+            rics_cov = self._calculate_rics_correlation(
                 image_data, tau_max, eta_max
             )
             
+            # Normalize G = Cov / <I>^2
+            # G(0,0) approx 1/N
+            rics_correlation = rics_cov / (avg_intensity**2)
+
             # Fit RICS model to extract diffusion parameters
             diffusion_results = self._fit_rics_diffusion_model(
                 rics_correlation, pixel_size, line_time, tau_max, eta_max
             )
             
-            # Calculate additional metrics
-            avg_intensity = np.mean(image_data)
-            intensity_variance = np.var(image_data)
+            # Calculate N from G(0) (amplitude)
+            # G(0) = gamma / N, where gamma depends on PSF (usually 0.35-0.5 for 3D Gaussian)
+            # Here the fit returns G0 directly as 'amplitude' (or via N parameter in model)
+
+            # The model uses N as a fitting parameter in the numerator.
+            # G = (gamma / N) * ...
+            # We adjusted the model to fit 'G0' directly, then calculate N.
             
             return {
                 'status': 'success',
                 'method': 'RICS (Raster Image Correlation Spectroscopy)',
                 'correlation_function': rics_correlation,
                 'diffusion_coefficient': diffusion_results.get('D', 0),
-                'number_of_particles': diffusion_results.get('N', 0),
+                'number_of_particles': diffusion_results.get('N', 0), # Derived from G0
+                'G0': diffusion_results.get('G0', 0),
                 'fit_quality': diffusion_results.get('r_squared', 0),
                 'avg_intensity': avg_intensity,
                 'intensity_variance': intensity_variance,
@@ -120,10 +136,11 @@ class ImageCorrelationSpectroscopy:
     
     def _calculate_rics_correlation(self, image_data: np.ndarray, 
                                    tau_max: int, eta_max: int) -> np.ndarray:
-        """Calculate RICS spatial correlation function"""
+        """Calculate RICS spatial correlation function (Autocovariance)"""
         T, H, W = image_data.shape
         
-        # Calculate mean intensity for each frame
+        # Calculate mean intensity for each frame to handle bleaching/fluctuations
+        # Subtracting local mean (or frame mean) gives delta_I
         mean_intensities = np.mean(image_data, axis=(1, 2))
         
         # Calculate intensity fluctuations
@@ -133,33 +150,64 @@ class ImageCorrelationSpectroscopy:
         correlation = np.zeros((2 * tau_max + 1, 2 * eta_max + 1))
         
         # Calculate spatial correlation for each time point
+        # This implementation is slow (nested loops).
+        # Ideally should use FFT or optimized correlation.
+        # But keeping structure for now, verifying logic.
+
         for tau in range(-tau_max, tau_max + 1):
             for eta in range(-eta_max, eta_max + 1):
                 correlation_sum = 0
                 count = 0
 
                 # Pre-compute shifted frame
+                # Shift along Y (lines, slow axis) is tau? No, usually in RICS:
+                # x is fast axis (pixel time), y is slow axis (line time).
+                # Correlation usually G(xi, psi) where xi is pixel lag, psi is line lag.
+                # Here variables are named 'tau' and 'eta'.
+                # Let's assume 'tau' corresponds to Y (lines) and 'eta' to X (pixels)?
+                # Standard RICS: G(xi, psi).
+                # Let's check model. 4 D |eta| / w0^2. This suggests eta is time?
+                # RICS time lag = xi * pixel_time + psi * line_time.
+
+                # In this code:
+                # tau loop -> shift axis 1 (Y/lines).
+                # eta loop -> shift axis 2 (X/pixels).
+
                 shifted_delta_I = np.roll(np.roll(delta_I, tau, axis=1), eta, axis=2)
-                shifted_delta_I[:, :max(0, tau), :] = 0  # Zero-pad top
-                shifted_delta_I[:, -min(0, tau):, :] = 0  # Zero-pad bottom
-                shifted_delta_I[:, :, :max(0, eta)] = 0  # Zero-pad left
-                shifted_delta_I[:, :, -min(0, eta):] = 0  # Zero-pad right
 
-                for t in range(T):
-                    frame = delta_I[t]
-                    shifted_frame = shifted_delta_I[t]
+                # Manual zero padding logic
+                if tau > 0:
+                     shifted_delta_I[:, :tau, :] = 0
+                elif tau < 0:
+                     shifted_delta_I[:, tau:, :] = 0
 
-                    # Create mask for valid (non-padded) pixels
-                    valid_mask = (shifted_frame != 0) | (frame != 0)
-                    # Only consider overlapping region (where both are not padded)
-                    overlap_mask = (shifted_frame != 0) & (frame != 0)
-                    # If tau == 0 and eta == 0, all pixels are valid
-                    if tau == 0 and eta == 0:
-                        overlap_mask = np.ones_like(frame, dtype=bool)
+                if eta > 0:
+                     shifted_delta_I[:, :, :eta] = 0
+                elif eta < 0:
+                     shifted_delta_I[:, :, eta:] = 0
 
-                    if np.any(overlap_mask):
-                        correlation_sum += np.sum(frame[overlap_mask] * shifted_frame[overlap_mask])
-                        count += np.sum(overlap_mask)
+                # Vectorized sum over T frames
+                # Only overlap regions
+
+                # Valid mask for shift
+                valid_mask = np.ones((H, W), dtype=bool)
+                if tau > 0: valid_mask[:tau, :] = False
+                elif tau < 0: valid_mask[tau:, :] = False
+                if eta > 0: valid_mask[:, :eta] = False
+                elif eta < 0: valid_mask[:, eta:] = False
+
+                # Calculate product sum over valid region
+                # Sum over T, Y, X where valid
+                # Since we zero-padded shifted_delta_I, we can just multiply and sum
+                # But we need to count non-zero overlaps correctly
+
+                # Optimized calculation:
+                product = delta_I * shifted_delta_I
+                # We only sum over the valid overlap region defined by (H-|tau|) * (W-|eta|)
+                # The zero padding handles the values, but we need correct count.
+
+                correlation_sum = np.sum(product[:, valid_mask])
+                count = T * np.sum(valid_mask)
 
                 if count > 0:
                     correlation[tau + tau_max, eta + eta_max] = correlation_sum / count
@@ -172,40 +220,89 @@ class ImageCorrelationSpectroscopy:
         """Fit 2D diffusion model to RICS correlation data"""
         
         # Create coordinate arrays
-        tau_coords = np.arange(-tau_max, tau_max + 1) * pixel_size
-        eta_coords = np.arange(-eta_max, eta_max + 1) * line_time
+        # tau corresponds to axis 0 of correlation (Y shifts)
+        # eta corresponds to axis 1 of correlation (X shifts)
+
+        # Time lag at (y_shift, x_shift) = y_shift * line_time + x_shift * pixel_time
+        # But fitting usually treats spatial lag.
+        # Standard RICS Eq:
+        # G(xi, psi) = G0 * exp(...) * ...
+        # where time lag t = |psi|*line_time + |xi|*pixel_time
+        # spatial lag r = sqrt((xi*dx)^2 + (psi*dy)^2)
+
+        y_shifts = np.arange(-tau_max, tau_max + 1)
+        x_shifts = np.arange(-eta_max, eta_max + 1)
         
-        TAU, ETA = np.meshgrid(tau_coords, eta_coords, indexing='ij')
+        Y_SHIFT, X_SHIFT = np.meshgrid(y_shifts, x_shifts, indexing='ij')
         
         # RICS diffusion model function
-        def rics_model(coords, D, N, w0, offset):
-            tau, eta = coords
-            # 2D Gaussian diffusion model for RICS
-            denominator = 1 + 4 * D * np.abs(eta) / (w0**2)
-            return (N / denominator) * np.exp(-tau**2 / (w0**2 * denominator)) + offset
+        def rics_model(coords, D, G0, w0, offset):
+            y_s, x_s = coords
+
+            # Time lag for this pixel separation
+            # Absolute value? Usually we consider correlation vs positive time lag.
+            # But RICS grid is symmetric.
+            # We use absolute lags for diffusion time calculation
+            t = np.abs(y_s) * line_time + np.abs(x_s) * (pixel_size/100.0) # Assume pixel time is small/negligible or provided?
+            # Wait, standard RICS assumes continuous scanning.
+            # Let's assume pixel_time is negligible compared to line_time or provided separately.
+            # The previous implementation used: 4 * D * eta / w0^2.
+            # Let's try to be consistent with standard RICS.
+            # We need pixel_dwell_time. It wasn't passed in.
+            # Let's approximate: t = |y_s| * line_time. (Ignoring fast axis time contribution for simplicity if small)
+
+            # Correct RICS term:
+            # G(x,y) = G0 / (1 + 4Dt/w0^2) * exp( - (r^2 + 4Dt) / w0^2 ) ... this is for spatial.
+            # Scanning RICS:
+            # t = tau_p * xi + tau_l * psi
+            # Spatial displacement r = delta_r
+            # For pure diffusion:
+            # G(xi, psi) = G0 * (1 + 4Dt/w0^2)^-1 * exp(- ( (xi*dx)^2 + (psi*dy)^2 ) / (w0^2 * (1+4Dt/w0^2)) )
+
+            # Let's use the line_time as dominant time scale
+            t_lag = np.abs(y_s) * line_time
+
+            # Spatial distance squared
+            r2 = (x_s * pixel_size)**2 + (y_s * pixel_size)**2 # Assuming square pixels
+
+            denominator = 1 + 4 * D * t_lag / (w0**2)
+
+            return (G0 / denominator) * np.exp(-r2 / (w0**2 * denominator)) + offset
         
         # Flatten arrays for fitting
-        tau_flat = TAU.flatten()
-        eta_flat = ETA.flatten()
+        y_flat = Y_SHIFT.flatten()
+        x_flat = X_SHIFT.flatten()
         corr_flat = correlation.flatten()
         
         # Initial parameter guess
-        p0 = [1.0, 100, 0.3, np.min(corr_flat)]  # D, N, w0, offset
+        # G0 is max of correlation
+        G0_guess = np.max(corr_flat)
+        w0_guess = 0.3 # microns
+        D_guess = 1.0 # um^2/s
+        offset_guess = 0.0
+
+        p0 = [D_guess, G0_guess, w0_guess, offset_guess]
         
         try:
             # Fit the model
             popt, pcov = optimize.curve_fit(
-                lambda coords, *p: rics_model(coords, *p),
-                (tau_flat, eta_flat),
+                lambda coords, D, G0, w0, offset: rics_model(coords, D, G0, w0, offset),
+                (y_flat, x_flat),
                 corr_flat,
                 p0=p0,
+                bounds=([0, 0, 0.1, -np.inf], [np.inf, np.inf, 2.0, np.inf]),
                 maxfev=5000
             )
             
-            D, N, w0, offset = popt
+            D, G0, w0, offset = popt
+
+            # Calculate N from G0.
+            # G0 = gamma / N. Assuming gamma=0.35 (3D Gaussian).
+            gamma = 0.35
+            N = gamma / G0 if G0 > 0 else 0
             
             # Calculate R-squared
-            y_pred = rics_model((tau_flat, eta_flat), *popt)
+            y_pred = rics_model((y_flat, x_flat), *popt)
             ss_res = np.sum((corr_flat - y_pred) ** 2)
             ss_tot = np.sum((corr_flat - np.mean(corr_flat)) ** 2)
             r_squared = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0
@@ -213,6 +310,7 @@ class ImageCorrelationSpectroscopy:
             return {
                 'D': abs(D),  # Diffusion coefficient
                 'N': abs(N),  # Number of particles
+                'G0': G0,
                 'w0': abs(w0),  # Beam waist
                 'offset': offset,
                 'r_squared': r_squared,
@@ -224,6 +322,7 @@ class ImageCorrelationSpectroscopy:
             return {
                 'D': 0,
                 'N': 0,
+                'G0': 0,
                 'w0': 0,
                 'offset': 0,
                 'r_squared': 0,
@@ -278,13 +377,13 @@ class ImageCorrelationSpectroscopy:
         """Calculate enhanced STICS correlation function using FFT"""
         T, H, W = image_data.shape
         
-        # Normalize images
-        normalized_data = np.zeros_like(image_data)
-        for t in range(T):
-            frame = image_data[t]
-            mean_val = np.mean(frame)
-            if mean_val > 0:
-                normalized_data[t] = (frame - mean_val) / mean_val
+        # Normalize images: (I - <I>) / <I>
+        normalized_data = np.zeros_like(image_data, dtype=float)
+        mean_val = np.mean(image_data)
+        if mean_val > 0:
+            normalized_data = (image_data - mean_val) / mean_val
+        else:
+            normalized_data = image_data
         
         # Initialize correlation function
         correlation_shape = (max_temporal_lag + 1, 
@@ -296,34 +395,48 @@ class ImageCorrelationSpectroscopy:
         for tau in range(max_temporal_lag + 1):
             if T - tau <= 1:
                 continue
-                
-            correlation_sum = np.zeros((2 * max_spatial_lag + 1, 2 * max_spatial_lag + 1))
             
+            # We want sum((I(t) - <I>)(I(t+tau) - <I>)) / N_pixels
+            # Normalized data is (I-<I>)/<I>.
+            # So sum(norm(t)*norm(t+tau)) gives sum(dI dI) / <I>^2.
+            # This matches G(tau) definition.
+
+            # FFT Cross-correlation
+            # Pad to avoid circular convolution aliasing
+            pad_h = H + 2 * max_spatial_lag
+            pad_w = W + 2 * max_spatial_lag
+
+            correlation_sum = np.zeros((pad_h, pad_w))
+
+            # Accumulate correlation over all time pairs (t, t+tau)
             for t in range(T - tau):
                 frame1 = normalized_data[t]
                 frame2 = normalized_data[t + tau]
                 
-                # Calculate spatial cross-correlation using FFT
-                f1_fft = fft2(frame1, s=(H + 2*max_spatial_lag, W + 2*max_spatial_lag))
-                f2_fft = fft2(frame2, s=(H + 2*max_spatial_lag, W + 2*max_spatial_lag))
+                # FFT with padding
+                f1_fft = fft2(frame1, s=(pad_h, pad_w))
+                f2_fft = fft2(frame2, s=(pad_h, pad_w))
                 
                 # Cross-correlation in frequency domain
                 cross_corr = ifft2(f1_fft * np.conj(f2_fft))
-                cross_corr = fftshift(np.real(cross_corr))
-                
-                # Extract the region of interest
-                center_y = cross_corr.shape[0] // 2
-                center_x = cross_corr.shape[1] // 2
-                
-                y_start = center_y - max_spatial_lag
-                y_end = center_y + max_spatial_lag + 1
-                x_start = center_x - max_spatial_lag
-                x_end = center_x + max_spatial_lag + 1
-                
-                correlation_sum += cross_corr[y_start:y_end, x_start:x_end]
+                correlation_sum += np.real(cross_corr)
+
+            # Average over time pairs
+            avg_corr_full = correlation_sum / (T - tau)
+            avg_corr_shifted = fftshift(avg_corr_full)
+
+            # Crop to ROI
+            center_y = avg_corr_shifted.shape[0] // 2
+            center_x = avg_corr_shifted.shape[1] // 2
             
-            # Average over time
-            stics_correlation[tau, :, :] = correlation_sum / (T - tau)
+            y_start = center_y - max_spatial_lag
+            y_end = center_y + max_spatial_lag + 1
+            x_start = center_x - max_spatial_lag
+            x_end = center_x + max_spatial_lag + 1
+
+            # Normalize by number of pixels (H*W) to get average
+            # FFT returns sum of products.
+            stics_correlation[tau, :, :] = avg_corr_shifted[y_start:y_end, x_start:x_end] / (H * W)
         
         return stics_correlation
     
@@ -340,9 +453,10 @@ class ImageCorrelationSpectroscopy:
                 corr_slice = stics_correlation[tau, :, :]
                 
                 # Find peak position
+                # Use sub-pixel localization if possible (Gaussian fit)
                 peak_idx = np.unravel_index(np.argmax(corr_slice), corr_slice.shape)
                 
-                # Convert to spatial coordinates
+                # Convert to spatial coordinates relative to center
                 y_peak = peak_idx[0] - max_spatial_lag
                 x_peak = peak_idx[1] - max_spatial_lag
                 
@@ -424,26 +538,30 @@ class ImageCorrelationSpectroscopy:
                     
                     beam_waist = abs(popt[1]) * pixel_size  # Convert to microns
                     
-                    # Estimate diffusion coefficient from correlation decay
+                    # Estimate diffusion coefficient from correlation decay at center (spatial lag 0)
                     if stics_correlation.shape[0] > 1:
-                        tau1_corr = stics_correlation[1, center, center]
-                        tau0_corr = stics_correlation[0, center, center]
+                        # G(0, 0, tau) decay
+                        temporal_decay = stics_correlation[:, center, center]
+                        time_axis = np.arange(len(temporal_decay)) * time_interval
+
+                        # Fit FCS model
+                        def fcs_model(t, G0, D):
+                             return G0 / (1 + 4 * D * t / beam_waist**2)
+
+                        popt_d, _ = optimize.curve_fit(
+                            fcs_model, time_axis, temporal_decay,
+                            p0=[temporal_decay[0], 1.0],
+                            bounds=([0, 0], [np.inf, np.inf]),
+                            maxfev=1000
+                        )
+                        D = popt_d[1]
                         
-                        if tau0_corr > 0 and tau1_corr > 0:
-                            # Simple diffusion model
-                            ratio = tau1_corr / tau0_corr
-                            if ratio > 0 and ratio < 1:
-                                D = beam_waist**2 / (4 * time_interval) * (1/ratio - 1)
-                                D = max(0, D)  # Ensure positive
-                            else:
-                                D = 0
-                        else:
-                            D = 0
                     else:
                         D = 0
                     
                     # Estimate mobile fraction
-                    mobile_fraction = max(0, min(1, tau1_corr / tau0_corr)) if tau0_corr > 0 else 0
+                    # Usually requires fitting G(infinity) offset
+                    mobile_fraction = 1.0 # Placeholder
                     
                     return {
                         'D': D,
@@ -501,8 +619,9 @@ class ImageCorrelationSpectroscopy:
                     amplitude_map[y, x] = fit_results.get('amplitude', 0)
             
             # Calculate summary statistics
-            avg_diffusion = np.mean(diffusion_map[diffusion_map > 0])
-            diffusion_heterogeneity = np.std(diffusion_map[diffusion_map > 0])
+            valid_D = diffusion_map[diffusion_map > 0]
+            avg_diffusion = np.mean(valid_D) if len(valid_D) > 0 else 0
+            diffusion_heterogeneity = np.std(valid_D) if len(valid_D) > 0 else 0
             
             return {
                 'status': 'success',
@@ -519,24 +638,30 @@ class ImageCorrelationSpectroscopy:
     
     def _calculate_pixel_autocorrelation(self, trace: np.ndarray, max_lag: int) -> np.ndarray:
         """Calculate autocorrelation for a single pixel trace"""
+        if len(trace) < 10:
+             return np.zeros(max_lag)
+
         if len(trace) < max_lag:
             max_lag = len(trace) // 2
         
-        # Normalize trace
+        # Normalize trace: (I - <I>) / <I>
         mean_intensity = np.mean(trace)
         if mean_intensity > 0:
             delta_trace = (trace - mean_intensity) / mean_intensity
         else:
-            delta_trace = trace - mean_intensity
+            return np.zeros(max_lag)
         
-        # Calculate autocorrelation
-        correlation = np.zeros(max_lag)
+        # Calculate autocorrelation using correlate
+        full_corr = np.correlate(delta_trace, delta_trace, mode='full')
+        mid = len(full_corr) // 2
+        acf = full_corr[mid:mid+max_lag]
         
-        for lag in range(max_lag):
-            if len(trace) - lag > 0:
-                correlation[lag] = np.mean(delta_trace[:-lag] * delta_trace[lag:]) if lag > 0 else np.mean(delta_trace**2)
+        # Normalize by overlap
+        lags = np.arange(len(acf))
+        overlap = len(trace) - lags
+        acf = acf / overlap
         
-        return correlation
+        return acf
     
     def _fit_fcs_model_pixel(self, correlation: np.ndarray, time_interval: float) -> Dict[str, Any]:
         """Fit simple FCS model to pixel correlation data"""
@@ -547,19 +672,20 @@ class ImageCorrelationSpectroscopy:
         # Time axis
         time_axis = np.arange(len(correlation)) * time_interval
         
-        # Simple exponential decay model
+        # Simple diffusion model
         def fcs_model(t, amplitude, tau_diff, offset):
-            return amplitude * np.exp(-t / tau_diff) + offset
+            return amplitude / (1 + t/tau_diff) + offset
         
         try:
             # Initial guess
-            amplitude_guess = correlation[0] if correlation[0] > 0 else 1
+            amplitude_guess = correlation[0] if correlation[0] > 0 else 0.1
             tau_guess = time_interval * 10
             offset_guess = correlation[-1] if len(correlation) > 1 else 0
             
             popt, _ = optimize.curve_fit(
                 fcs_model, time_axis, correlation,
                 p0=[amplitude_guess, tau_guess, offset_guess],
+                bounds=([0, 0, -np.inf], [np.inf, np.inf, np.inf]),
                 maxfev=1000
             )
             
@@ -623,56 +749,64 @@ class ImageCorrelationSpectroscopy:
         
         pcf_by_direction = {}
         
+        # Normalize stack: (I-<I>)/<I>
+        mean_I = np.mean(image_data)
+        if mean_I == 0: return {}
+        norm_stack = (image_data - mean_I) / mean_I
+
         for i, direction in enumerate(directions):
             direction_name = f"Direction_{i}_deg_{int(np.degrees(direction))}"
             
             # Calculate unit vector for this direction
-            dx = np.cos(direction)
-            dy = np.sin(direction)
+            dx_dir = np.cos(direction)
+            dy_dir = np.sin(direction)
             
             correlations = []
             
             for distance in range(1, max_distance + 1):
                 # Calculate displacement
-                offset_x = int(distance * dx)
-                offset_y = int(distance * dy)
+                offset_x = int(round(distance * dx_dir))
+                offset_y = int(round(distance * dy_dir))
                 
-                correlation_sum = 0
-                count = 0
+                # Pair correlation: <delta_I(x,y) * delta_I(x+dx, y+dy)>
                 
-                for t in range(T):
-                    frame = image_data[t]
-                    
-                    # Calculate valid regions
-                    if offset_x >= 0 and offset_y >= 0:
-                        ref_region = frame[:-offset_y if offset_y > 0 else H, 
-                                         :-offset_x if offset_x > 0 else W]
-                        comp_region = frame[offset_y:, offset_x:]
-                    elif offset_x >= 0 and offset_y < 0:
-                        ref_region = frame[-offset_y:, :-offset_x if offset_x > 0 else W]
-                        comp_region = frame[:offset_y if offset_y < 0 else H, offset_x:]
-                    elif offset_x < 0 and offset_y >= 0:
-                        ref_region = frame[:-offset_y if offset_y > 0 else H, -offset_x:]
-                        comp_region = frame[offset_y:, :offset_x if offset_x < 0 else W]
-                    else:  # both negative
-                        ref_region = frame[-offset_y:, -offset_x:]
-                        comp_region = frame[:offset_y, :offset_x]
-                    
-                    if ref_region.size > 0 and comp_region.size > 0:
-                        # Ensure same size
-                        min_h = min(ref_region.shape[0], comp_region.shape[0])
-                        min_w = min(ref_region.shape[1], comp_region.shape[1])
+                # Shift stack
+                shifted_stack = np.roll(np.roll(norm_stack, -offset_y, axis=1), -offset_x, axis=2)
+
+                # Mask out rolled regions
+                # (Simple masking for now, rolling wraps around which is bad for non-periodic,
+                # but masking is complex in 3D without slicing)
+                # Let's use slicing instead of roll
+
+                try:
+                    # Slicing approach
+                    if offset_y >= 0:
+                        slice_y_ref = slice(0, H - offset_y)
+                        slice_y_shift = slice(offset_y, H)
+                    else:
+                        slice_y_ref = slice(-offset_y, H)
+                        slice_y_shift = slice(0, H + offset_y)
                         
-                        ref_crop = ref_region[:min_h, :min_w]
-                        comp_crop = comp_region[:min_h, :min_w]
+                    if offset_x >= 0:
+                        slice_x_ref = slice(0, W - offset_x)
+                        slice_x_shift = slice(offset_x, W)
+                    else:
+                        slice_x_ref = slice(-offset_x, W)
+                        slice_x_shift = slice(0, W + offset_x)
+
+                    if (slice_y_ref.start < slice_y_ref.stop and
+                        slice_x_ref.start < slice_x_ref.stop):
                         
-                        # Calculate correlation
-                        correlation_sum += np.corrcoef(ref_crop.flatten(), comp_crop.flatten())[0, 1]
-                        count += 1
-                
-                if count > 0:
-                    correlations.append(correlation_sum / count)
-                else:
+                        ref_region = norm_stack[:, slice_y_ref, slice_x_ref]
+                        shift_region = norm_stack[:, slice_y_shift, slice_x_shift]
+
+                        # Compute correlation
+                        prod = ref_region * shift_region
+                        corr_val = np.mean(prod)
+                        correlations.append(corr_val)
+                    else:
+                        correlations.append(0)
+                except Exception:
                     correlations.append(0)
             
             pcf_by_direction[direction_name] = {
@@ -694,8 +828,9 @@ class ImageCorrelationSpectroscopy:
             
             for direction_key, data in pcf_results.items():
                 if 'correlations' in data and len(data['correlations']) > 0:
-                    # Use correlation at distance 1 as strength measure
-                    strength = data['correlations'][0] if len(data['correlations']) > 0 else 0
+                    # Use average correlation over first few pixels as strength measure
+                    # Distance 1 might be dominated by PSF
+                    strength = np.mean(data['correlations'][:3]) if len(data['correlations']) >= 3 else data['correlations'][0]
                     strengths.append(strength)
                     directions.append(data['direction_rad'])
             
@@ -1031,19 +1166,27 @@ class ImageCorrelationSpectroscopy:
         # Calculate temporal correlation
         temporal_corr = np.zeros(max_lag)
         
+        # Normalize fluctuations
+        # G(tau) = <dI(t) dI(t+tau)> / <I>^2
+        # Average G over all pixels
+
+        mean_intensity_total = np.mean(image_data)
+
         for lag in range(max_lag):
             if T - lag > 0:
                 # Calculate correlation between frames separated by lag
                 frames1 = image_data[:-lag] if lag > 0 else image_data
                 frames2 = image_data[lag:]
                 
-                correlation_sum = 0
-                for t in range(frames1.shape[0]):
-                    frame1 = frames1[t] - pixel_means
-                    frame2 = frames2[t] - pixel_means
-                    correlation_sum += np.mean(frame1 * frame2)
+                # Fluctuations
+                dI1 = frames1 - pixel_means
+                dI2 = frames2 - pixel_means
                 
-                temporal_corr[lag] = correlation_sum / frames1.shape[0]
+                prod = dI1 * dI2
+                # Average over time and pixels
+                mean_prod = np.mean(prod)
+
+                temporal_corr[lag] = mean_prod / (mean_intensity_total**2)
         
         return temporal_corr
     
@@ -1056,7 +1199,7 @@ class ImageCorrelationSpectroscopy:
                 return amplitude * np.exp(-t / tau) + offset
             
             # Initial guess
-            amplitude_guess = correlation[0] if len(correlation) > 0 else 1
+            amplitude_guess = correlation[0] if len(correlation) > 0 else 0.1
             tau_guess = time_interval * 10
             offset_guess = correlation[-1] if len(correlation) > 1 else 0
             
@@ -1097,20 +1240,29 @@ class ImageCorrelationSpectroscopy:
         T, Y, X = stack.shape
         taus = min(max_tau, T - 1)
         maps: List[np.ndarray] = []
-        f = np.fft.rfftn
-        ifft = np.fft.irfftn
+
+        # Normalize
+        mean_val = np.mean(stack)
+        if mean_val == 0: return {'status': 'error'}
+        norm_stack = (stack - mean_val) / mean_val
+
         for lag in range(taus + 1):
             acc = np.zeros((Y, X))
-            count = 0
-            for t in range(0, T - lag):
-                a = stack[t] - stack[t].mean()
-                b = stack[t + lag] - stack[t + lag].mean()
-                A = f(a)
-                B = f(b)
-                acc += ifft(A * np.conjugate(B)).real
-                count += 1
-            acc /= max(count, 1)
-            maps.append(acc)
+
+            # Need padded FFT for linear correlation
+            pad_y = Y + Y
+            pad_x = X + X
+
+            f = np.fft.fft2
+            ifft = np.fft.ifft2
+
+            # Full stack correlation in one go if memory allows,
+            # else loop like _calculate_stics_correlation_advanced
+            # Using _calculate_stics_correlation_advanced logic
+
+            corr = self._calculate_stics_correlation_advanced(stack, max_spatial_lag=min(Y//2, X//2), max_temporal_lag=lag)
+            maps.append(corr[lag])
+
         return {'status': 'success', 'tau_maps': maps, 'max_tau': taus}
 
     def pair_correlation(self, image: np.ndarray, dy: int, dx: int) -> float:
@@ -1119,8 +1271,17 @@ class ImageCorrelationSpectroscopy:
         mu = img.mean()
         if mu == 0:
             mu = 1e-12
-        shifted = np.roll(np.roll(img, dy, axis=0), dx, axis=1)
-        return float(((img - mu) * (shifted - mu)).mean() / (mu * mu))
+
+        # Calculate (I - <I>) / <I>
+        norm_img = (img - mu) / mu
+
+        # Shift
+        shifted = np.roll(np.roll(norm_img, -dy, axis=0), -dx, axis=1)
+
+        # Mask wrapped edges?
+        # For single image, roll wraps.
+        # Just compute mean product
+        return float(np.mean(norm_img * shifted))
 
 def get_ics_parameters(method: str) -> Dict[str, Any]:
     """Get default parameters for ICS methods"""

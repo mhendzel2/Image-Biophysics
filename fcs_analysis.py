@@ -10,6 +10,7 @@ from typing import Dict, Any, List, Tuple
 
 def fcs_model_2d(tau, G0, D, w0):
     """2D FCS diffusion model"""
+    # Note: G0 is inversely proportional to N (number of particles)
     return G0 / (1 + 4 * D * tau / w0**2)
 
 def fcs_model_3d(tau, G0, D, w0, wz):
@@ -25,15 +26,15 @@ def fit_fcs_data(tau, acf, model_func=fcs_model_2d, bounds=None):
     try:
         acf = np.nan_to_num(acf, nan=0, posinf=0, neginf=0)  # Handle potential NaNs or Infs
         # Initial guesses
-        G0_guess = acf[0] if len(acf) > 0 and acf[0] > 0 else 0.1
+        G0_guess = acf[0] if len(acf) > 0 and acf[0] > 0 else 0.01
         w0_guess = 0.2  # Typical beam waist in um
         
         # Find half-maximum point for D estimate
         half_max_idx = np.argmin(np.abs(acf - G0_guess / 2)) if G0_guess > 0 else len(acf) // 4
-        if half_max_idx < len(tau) and half_max_idx > 0:
+        if half_max_idx < len(tau) and half_max_idx > 0 and tau[half_max_idx] > 0:
             D_guess = w0_guess**2 / (4 * tau[half_max_idx])
         else:
-            D_guess = 0.01
+            D_guess = 1.0 # Default guess if determination fails
         
         if model_func == fcs_model_2d:
             p0 = [G0_guess, D_guess, w0_guess]
@@ -74,27 +75,55 @@ def fit_fcs_data(tau, acf, model_func=fcs_model_2d, bounds=None):
             return [0, 0, 0], np.zeros((3, 3)), 0
 
 def calculate_autocorrelation(intensity_trace, normalize=True, max_lag=None):
-    """Calculate normalized autocorrelation function"""
+    """
+    Calculate normalized autocorrelation function.
+    G(tau) = <delta_I(t) * delta_I(t+tau)> / <I(t)>^2
+    This normalization preserves the G(0) = 1/N relationship.
+    """
     
     if len(intensity_trace) < 10:
-        return np.array([1]), np.array([0])
+        return np.array([0]), np.array([0])
     
-    # Remove mean
-    trace_normalized = intensity_trace - np.mean(intensity_trace)
+    # Calculate mean intensity
+    mean_intensity = np.mean(intensity_trace)
+    if mean_intensity == 0:
+         return np.array([0]), np.array([0])
+
+    # Calculate fluctuations
+    trace_fluctuations = intensity_trace - mean_intensity
     
     # Calculate maximum lag
+    N = len(trace_fluctuations)
     if max_lag is None:
-        max_lag = len(trace_normalized) // 4
+        max_lag = N // 4
     else:
-        max_lag = min(max_lag, len(trace_normalized) // 2)
+        max_lag = min(max_lag, N // 2)
     
-    # Calculate autocorrelation using numpy
-    full_corr = np.correlate(trace_normalized, trace_normalized, mode='full')
+    # Calculate autocorrelation using numpy's correlate
+    # mode='full' returns the convolution sum.
+    # At lag tau, the sum is over N-tau elements.
+    full_corr = np.correlate(trace_fluctuations, trace_fluctuations, mode='full')
     mid_point = len(full_corr) // 2
-    acf = full_corr[mid_point:mid_point + max_lag]
     
-    if normalize and len(acf) > 0 and acf[0] != 0:
-        acf = acf / acf[0]
+    # Extract the positive lags
+    acf_sum = full_corr[mid_point:mid_point + max_lag]
+
+    # Correct for the number of overlapping points (triangle bias)
+    # The number of overlapping points for lag tau is N - tau
+    lags = np.arange(len(acf_sum))
+    normalization_factor = N - lags
+
+    # Avoid division by zero
+    normalization_factor[normalization_factor == 0] = 1
+
+    # Calculate covariance: (1/(N-tau)) * sum(...)
+    acf_cov = acf_sum / normalization_factor
+
+    # Normalize by mean squared: G(tau) = Cov(tau) / <I>^2
+    if normalize:
+        acf = acf_cov / (mean_intensity**2)
+    else:
+        acf = acf_cov
     
     return acf
 
@@ -105,11 +134,12 @@ def segmented_fcs_analysis(image_data, segmentation_type='x', segment_length=128
     Performs segmented FCS analysis on image data.
     
     Args:
-        image_data: 2D array (time/line vs. pixels)
-        segmentation_type: 'x' (pixels) or 'y' (lines)
+        image_data: 2D array (pixels, lines) where lines typically represent time.
+                    Shape: (num_pixels, num_lines) or (X, T) for line scan.
+        segmentation_type: 'x' (segments along pixels axis) or 'y' (segments along lines axis)
         segment_length: Length of each segment
-        pixel_time: Time per pixel (seconds)
-        line_time: Time per line (seconds)
+        pixel_time: Time per pixel (seconds) - effective time step if correlating along pixels
+        line_time: Time per line (seconds) - effective time step if correlating along lines
         pixel_size: Physical pixel size (um)
         model_type: '2d', '3d', or 'anomalous'
         max_lag_fraction: Maximum lag as fraction of segment length
@@ -119,7 +149,7 @@ def segmented_fcs_analysis(image_data, segmentation_type='x', segment_length=128
     """
     
     if image_data.ndim != 2:
-        raise ValueError("Segmented FCS requires 2D image data (time/line vs. pixels).")
+        raise ValueError("Segmented FCS requires 2D image data (pixels, lines).")
     
     num_pixels, num_lines = image_data.shape
     
@@ -137,15 +167,25 @@ def segmented_fcs_analysis(image_data, segmentation_type='x', segment_length=128
     
     if segmentation_type == 'x':
         # Segment along x-axis (pixels)
+        # We assume we want to analyze temporal fluctuations within each spatial segment.
+        # If image_data is (pixels, lines) and lines=time:
+        # We take a chunk of pixels. We can average the pixels in the chunk to get a lower-noise time trace.
+        # Or we can analyze each pixel separately and average ACFs (more rigorous but slower).
+        # Here we will average the intensity spatially (axis 0 of segment) to get a time trace.
+
         num_segments = num_pixels // segment_length
-        time_step = pixel_time
+        # Correlation is along time (lines)
+        time_step = line_time
         
         for i in range(num_segments):
             start_idx = i * segment_length
             end_idx = (i + 1) * segment_length
             
+            # Segment shape: (segment_length, num_lines)
             segment = image_data[start_idx:end_idx, :]
-            mean_intensity_trace = np.mean(segment, axis=1)
+
+            # Average over spatial dimension (axis 0) to get time trace
+            mean_intensity_trace = np.mean(segment, axis=0)
             
             # Calculate maximum lag
             max_lag = int(len(mean_intensity_trace) * max_lag_fraction)
@@ -163,7 +203,7 @@ def segmented_fcs_analysis(image_data, segmentation_type='x', segment_length=128
             # Store results
             result  = {
                 'segment_index': i,
-                'segment_type': 'x',
+                'segment_type': 'x (spatial segment)',
                 'segment_position': start_idx * pixel_size,
                 'G0': params[0],
                 'D': params[1],
@@ -189,7 +229,14 @@ def segmented_fcs_analysis(image_data, segmentation_type='x', segment_length=128
             results.append(result)
             
     elif segmentation_type == 'y':
-        # Segment along y-axis (lines)
+        # Segment along y-axis (lines/time)
+        # This breaks the long time trace into shorter chunks.
+        # We average over all pixels to get a single time trace, then segment that trace.
+        # OR we maintain the pixels and segment the time axis of the 2D array.
+
+        # Usually, if we segment time, we want to see how diffusion changes over time.
+        # So for each time segment, we calculate one ACF (spatially averaged).
+
         num_segments = num_lines // segment_length
         time_step = line_time
         
@@ -197,7 +244,10 @@ def segmented_fcs_analysis(image_data, segmentation_type='x', segment_length=128
             start_idx = i * segment_length
             end_idx = (i + 1) * segment_length
             
+            # Segment shape: (num_pixels, segment_length)
             segment = image_data[:, start_idx:end_idx]
+
+            # Average over spatial dimension (axis 0) to get time trace for this segment
             mean_intensity_trace = np.mean(segment, axis=0)
             
             # Calculate maximum lag
@@ -216,8 +266,8 @@ def segmented_fcs_analysis(image_data, segmentation_type='x', segment_length=128
             # Store results
             result  = {
                 'segment_index': i,
-                'segment_type': 'y',
-                'segment_position': start_idx * pixel_size,
+                'segment_type': 'y (temporal segment)',
+                'segment_position': start_idx * line_time, # Time position
                 'G0': params[0],
                 'D': params[1],
                 'w0': params[2] if len(params) > 2 else 0,
