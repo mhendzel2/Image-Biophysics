@@ -1,23 +1,21 @@
 """
 Visualization Module
-
-Handles the display of 2D and 3D image data using Streamlit, Matplotlib, and Plotly.
+Shared visualization methods for different analysis types and data formats
 """
 
 import streamlit as st
 import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import plotly.express as px
 import plotly.graph_objects as go
+import plotly.io as pio
+from plotly.subplots import make_subplots
+from typing import Dict, Any, Optional, List, Tuple
+import warnings
+import io
 
 class VisualizationManager:
-<<<<<<< HEAD
-    """Manages the creation of various data visualizations."""
-
-    def display_2d_slice(self, image_data: np.ndarray, title: str = "2D Slice"):
-        """Displays a 2D slice of a 3D image or a 2D image."""
-        if image_data.ndim == 3:
-            # If 3D, show the middle slice
-            display_img = image_data[image_data.shape[0] // 2]
-=======
     """Main visualization manager with shared methods across analysis types"""
     
     def __init__(self):
@@ -30,6 +28,7 @@ class VisualizationManager:
             'jet': 'jet'
         }
         self.default_figsize = (10, 8)
+        self.last_figure = None  # Track the most recently generated figure for export
         
     def display_image(self, 
                      image_data: np.ndarray, 
@@ -92,6 +91,7 @@ class VisualizationManager:
         
         fig.update_coloraxes(colorbar_title="Intensity")
         
+        self.last_figure = fig  # Store for export
         st.plotly_chart(fig, use_container_width=True)
         
         # Display image statistics
@@ -117,18 +117,12 @@ class VisualizationManager:
             self._display_fcs_results(results)
         elif "iMSD" in analysis_name:
             self._display_imsd_results(results)
->>>>>>> 6cc55e84dc6132b7af39522e705bd7e449c1e986
         else:
-            display_img = image_data
+            self._display_generic_results(results)
+    
+    def _display_rics_results(self, results: Dict[str, Any]) -> None:
+        """Display RICS analysis results with multichannel support"""
         
-<<<<<<< HEAD
-        st.image(display_img, caption=title, use_column_width=True)
-
-    def display_interactive_3d_volume(self, image_data: np.ndarray):
-        """Displays an interactive 3D volume rendering of a 3D numpy array."""
-        if image_data.ndim != 3:
-            st.warning("3D volume rendering requires a 3D image.")
-=======
         st.subheader("RICS Analysis Results")
         
         # Check if this is multichannel results
@@ -296,6 +290,7 @@ class VisualizationManager:
                     height=500
                 )
                 
+                self.last_figure = fig  # Store for export
                 st.plotly_chart(fig, use_container_width=True)
         else:
             st.info("No correlation curves available for display")
@@ -450,34 +445,45 @@ class VisualizationManager:
         
         if not fit_results:
             st.info("No fit results available")
->>>>>>> 6cc55e84dc6132b7af39522e705bd7e449c1e986
             return
-
-        z, y, x = image_data.shape
-        Z, Y, X = np.mgrid[:z, :y, :x]
-
-        fig = go.Figure(data=go.Volume(
-            x=X.flatten(),
-            y=Y.flatten(),
-            z=Z.flatten(),
-            value=image_data.flatten(),
-            isomin=np.min(image_data),
-            isomax=np.max(image_data),
-            opacity=0.1,  # Adjust for better visualization
-            surface_count=20, # Adjust for detail
-            colorscale='viridis'
+        
+        # Convert to dataframe
+        df_data = []
+        for i, fit in enumerate(fit_results):
+            df_data.append({
+                "Region": i,
+                "N Molecules": f"{fit.get('n_molecules', 0):.2f}",
+                "τ_diff (s)": f"{fit.get('tau_diff', 0):.3f}",
+                "S Ratio": f"{fit.get('s_ratio', 0):.3f}",
+                "Amplitude": f"{fit.get('amplitude', 0):.3f}"
+            })
+        
+        df = pd.DataFrame(df_data)
+        st.dataframe(df, use_container_width=True)
+    
+    def create_correlation_heatmap(self, correlation_matrix: np.ndarray, 
+                                 labels: Optional[List[str]] = None,
+                                 title: str = "Correlation Matrix") -> go.Figure:
+        """Create an interactive correlation heatmap"""
+        
+        fig = go.Figure(data=go.Heatmap(
+            z=correlation_matrix,
+            x=labels,
+            y=labels,
+            colorscale='RdBu_r',
+            zmid=0,
+            text=np.round(correlation_matrix, 2),
+            texttemplate="%{text}",
+            textfont={"size": 10},
+            hoverongaps=False
         ))
         
         fig.update_layout(
-            title="Interactive 3D Volume",
-            scene_xaxis_title='X',
-            scene_yaxis_title='Y',
-            scene_zaxis_title='Z'
+            title=title,
+            width=600,
+            height=600
         )
         
-<<<<<<< HEAD
-        st.plotly_chart(fig, use_container_width=True)
-=======
         return fig
     
     def create_particle_trajectory_plot(self, trajectories: List[np.ndarray], 
@@ -509,19 +515,113 @@ class VisualizationManager:
         return fig
     
     def export_plots(self, format_type: str) -> bytes:
-        """Export current plots to specified format"""
+        """Export the most recently displayed plot to the specified format.
         
-        if format_type == "PNG":
-            # Would implement PNG export
-            pass
-        elif format_type == "SVG":
-            # Would implement SVG export
-            pass
-        elif format_type == "PDF":
-            # Would implement PDF export
-            pass
+        Args:
+            format_type: One of "PNG", "SVG", or "PDF" (case-insensitive).
+            
+        Returns:
+            Bytes of the exported file, or a helpful message if no figure is available
+            or the format is unsupported.
+        """
+        if self.last_figure is None:
+            return b"No figure has been generated yet. Please display a plot first."
         
-        return b"Export functionality to be implemented"
+        fmt = format_type.lower()
+        if fmt not in ['png', 'svg', 'pdf']:
+            return f"Unsupported export format: {format_type}. Supported formats: PNG, SVG, PDF.".encode('utf-8')
+        
+        try:
+            # Try using plotly's built-in to_image (requires kaleido)
+            img_bytes = self.last_figure.to_image(format=fmt)
+            return img_bytes
+        except Exception as e:
+            # Fallback: use plotly.io if kaleido is unavailable
+            try:
+                buf = io.BytesIO()
+                pio.write_image(self.last_figure, buf, format=fmt)
+                buf.seek(0)
+                return buf.getvalue()
+            except Exception as fallback_error:
+                error_msg = f"Export failed. Please install kaleido: pip install kaleido\nError: {str(fallback_error)}"
+                return error_msg.encode('utf-8')
+    
+    def display_2d_slice(self, image_data: np.ndarray, title: str = "2D Slice") -> None:
+        """Display a 2D slice from image data.
+        
+        If the input is 3D, extracts the middle slice along the first axis.
+        
+        Args:
+            image_data: 2D or 3D numpy array
+            title: Title for the displayed image
+        """
+        if image_data is None or image_data.size == 0:
+            st.warning("No image data to display")
+            return
+        
+        if image_data.ndim == 3:
+            # Extract middle slice from 3D volume
+            slice_img = image_data[image_data.shape[0] // 2]
+        elif image_data.ndim == 2:
+            slice_img = image_data
+        else:
+            st.warning(f"Unsupported image dimensions: {image_data.ndim}D. Expected 2D or 3D.")
+            return
+        
+        self.display_image(slice_img, title=title)
+    
+    def display_interactive_3d_volume(self, image_data: np.ndarray, 
+                                       title: str = "3D Volume",
+                                       opacity: float = 0.1,
+                                       surface_count: int = 20,
+                                       colorscale: str = 'viridis') -> None:
+        """Display an interactive 3D volume rendering using Plotly.
+        
+        Args:
+            image_data: 3D numpy array representing the volume
+            title: Title for the visualization
+            opacity: Opacity of the volume rendering (0-1)
+            surface_count: Number of isosurfaces to render
+            colorscale: Colorscale for the volume
+        """
+        if image_data is None or image_data.size == 0:
+            st.warning("No image data to display")
+            return
+        
+        if image_data.ndim != 3:
+            st.warning(f"3D volume rendering requires a 3D image. Got {image_data.ndim}D data.")
+            return
+        
+        z_dim, y_dim, x_dim = image_data.shape
+        Z, Y, X = np.mgrid[:z_dim, :y_dim, :x_dim]
+        
+        fig = go.Figure(data=go.Volume(
+            x=X.flatten(),
+            y=Y.flatten(),
+            z=Z.flatten(),
+            value=image_data.flatten(),
+            isomin=float(np.min(image_data)),
+            isomax=float(np.max(image_data)),
+            opacity=opacity,
+            surface_count=surface_count,
+            colorscale=colorscale,
+            caps=dict(x_show=False, y_show=False, z_show=False)
+        ))
+        
+        fig.update_layout(
+            title=title,
+            scene=dict(
+                xaxis_title='X',
+                yaxis_title='Y',
+                zaxis_title='Z',
+                aspectmode='data'
+            ),
+            width=700,
+            height=700
+        )
+        
+        self.last_figure = fig  # Store for export
+        st.plotly_chart(fig, use_container_width=True)
     
     def _create_channel_colormap(self, hex_color: str) -> str:
         """Create a grayscale-to-color colormap for channel visualization"""
@@ -691,4 +791,3 @@ class VisualizationManager:
         fig.update_layout(height=300*rows, width=300*cols)
         
         return fig
->>>>>>> 6cc55e84dc6132b7af39522e705bd7e449c1e986
