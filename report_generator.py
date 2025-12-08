@@ -129,7 +129,7 @@ class ReportGenerator:
 
         box_plot_html = get_plot_html(box_fig)
         dist_plot_html = get_plot_html(dist_fig)
-corr_plot_html = get_plot_html(corr_fig)
+        corr_plot_html = get_plot_html(corr_fig)
 
 
         # --- 3. Format Final HTML ---

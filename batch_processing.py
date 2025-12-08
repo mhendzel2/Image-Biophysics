@@ -8,6 +8,7 @@ output directory.
 
 import os
 import pandas as pd
+import numpy as np
 from pathlib import Path
 from typing import List, Dict, Any
 from data_loader import DataLoader
