@@ -57,6 +57,9 @@ number_and_brightness = safe_import('number_and_brightness', 'Number & Brightnes
 pair_correlation_function = safe_import('pair_correlation_function', 'Pair Correlation Function')
 population_analysis = safe_import('population_analysis', 'Population Analysis')
 statistics_analyzer = safe_import('statistics_analyzer', 'Statistics Analyzer')
+displacement_correlation_spectroscopy = safe_import('displacement_correlation_spectroscopy', 'Displacement Correlation Spectroscopy')
+deformation_microscopy = safe_import('deformation_microscopy', 'Deformation Microscopy')
+two_domain_elastography = safe_import('two_domain_elastography', 'Two-Domain Elastography')
 
 
 # Initialize session state

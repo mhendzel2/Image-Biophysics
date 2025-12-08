@@ -19,6 +19,9 @@ A comprehensive Streamlit-based application for microscopy data analysis, featur
 - **Image Correlation Spectroscopy (ICS)**: RICS, STICS, imaging FCS, pair correlation
 - **Number & Brightness (N&B) Analysis**: Determine molecular brightness and concentration.
 - **Pair Correlation Function (PCF) Analysis**: Quantify spatial clustering of molecules.
+- **Displacement Correlation Spectroscopy (DCS)**: PIV-based chromatin dynamics analysis with MSND and SDACF (Zidovska et al. 2013)
+- **Deformation Microscopy (DM)**: Hyperelastic warping for high-resolution strain mapping (Ghosh et al. 2019)
+- **Two-Domain Nuclear Elastography**: Inverse FE optimization for heterochromatin/euchromatin stiffness ratio (Ghosh et al. 2021)
 
 ### AI Enhancement
 - **Denoising**: Non-local means, Richardson-Lucy deconvolution
