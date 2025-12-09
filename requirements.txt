@@ -40,6 +40,11 @@ streamlit>=1.45.1
 torch>=2.0.0
 torchvision>=0.15.0
 
+# Allen Cell & Structure Segmenter
+aicssegmentation>=0.5.2
+aicsmlsegment>=0.0.7
+segmenter_model_zoo
+
 # Optional AI segmentation / restoration extras
 cellpose>=3.0.0  # Uses newer architecture compatible with NumPy 1.x
 # Note: stardist and n2v have conflicting csbdeep requirements

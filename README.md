@@ -22,6 +22,7 @@ A comprehensive Streamlit-based application for microscopy data analysis, featur
 - **Displacement Correlation Spectroscopy (DCS)**: PIV-based chromatin dynamics analysis with MSND and SDACF (Zidovska et al. 2013)
 - **Deformation Microscopy (DM)**: Hyperelastic warping for high-resolution strain mapping (Ghosh et al. 2019)
 - **Two-Domain Nuclear Elastography**: Inverse FE optimization for heterochromatin/euchromatin stiffness ratio (Ghosh et al. 2021)
+- **Allen Cell & Structure Segmenter**: Integrated 3D segmentation using classic workflows and deep learning models (Chen et al. 2020).
 
 ### AI Enhancement
 - **Denoising**: Non-local means, Richardson-Lucy deconvolution
@@ -64,7 +65,7 @@ For full functionality, install additional libraries:
 pip install tifffile readlif pylibczirw
 
 # AI enhancement (optional)
-pip install tensorflow cellpose stardist aics-segmentation
+pip install tensorflow cellpose stardist aicssegmentation aicsmlsegment segmenter_model_zoo
 
 # Advanced analysis
 pip install noise2void csbdeep
@@ -98,6 +99,27 @@ Access the application at `http://localhost:5000`
 | Zeiss CZI | .czi | pylibczirw | Zeiss Zen format |
 | Leica LIF | .lif | readlif | Leica SP8 format |
 | Olympus | .oif, .oib | tifffile | Olympus imaging |
+
+## Allen Cell Segmenter Integration
+
+This platform integrates the [Allen Cell & Structure Segmenter](https://www.allencell.org/segmenter.html) (Chen et al., 2020) for robust 3D segmentation of intracellular structures.
+
+### Capabilities
+- **Classic Workflows**: Tuned segmentation algorithms for specific structures (e.g., LAMP1, DNA, Tom20).
+- **Deep Learning (ML)**: Pre-trained models from the Allen Cell Model Zoo.
+
+### Usage
+1. Navigate to the **Allen Cell Segmenter** tab.
+2. Select **Classic** or **ML** backend.
+   - *Note*: ML backend requires a GPU and PyTorch installation.
+3. Choose the target structure or model from the dropdown.
+4. Run segmentation on the loaded image.
+
+### Requirements
+- **Classic**: `aicssegmentation`
+- **ML**: `aicsmlsegment`, `segmenter_model_zoo`, `torch`, `torchvision` (CUDA recommended)
+
+For more details, visit the [Allen Cell Segmenter documentation](https://allencell.github.io/aics-segmentation/).
 | FCS Data | .fcs, .raw, .csv | Custom | Correlation data |
 
 ## Architecture

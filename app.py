@@ -51,6 +51,7 @@ segmented_fcs = safe_import('segmented_fcs', 'Segmented FCS')
 displacement_correlation_spectroscopy = safe_import('displacement_correlation_spectroscopy', 'DCS Analysis')
 deformation_microscopy = safe_import('deformation_microscopy', 'Deformation Microscopy')
 two_domain_elastography = safe_import('two_domain_elastography', 'Two-Domain Elastography')
+allen_segmenter_ui = safe_import('allen_segmenter.ui', 'Allen Segmenter UI')
 optical_flow_analysis = safe_import('optical_flow_analysis', 'Optical Flow Analysis')
 image_correlation_spectroscopy = safe_import('image_correlation_spectroscopy', 'Image Correlation Spectroscopy')
 nuclear_biophysics = safe_import('nuclear_biophysics', 'Nuclear Biophysics')
@@ -175,7 +176,8 @@ def main():
                 "📊 Analysis",
                 "📈 Visualization",
                 "📄 Reports",
-                "⚙️ Batch Processing"
+                "⚙️ Batch Processing",
+                "🧬 Allen Cell Segmenter"
             ],
             label_visibility="collapsed"
         )
@@ -202,7 +204,8 @@ def main():
             "Number & Brightness": number_and_brightness is not None,
             "Pair Correlation Function": pair_correlation_function is not None,
             "Population Analysis": population_analysis is not None,
-            "Statistics Analyzer": statistics_analyzer is not None
+            "Statistics Analyzer": statistics_analyzer is not None,
+            "Allen Cell Segmenter": allen_segmenter_ui is not None
         }
 
         for module, available in modules_status.items():
@@ -234,6 +237,11 @@ def main():
         show_reports_page()
     elif page == "⚙️ Batch Processing":
         show_batch_processing_page()
+    elif page == "🧬 Allen Cell Segmenter":
+        if allen_segmenter_ui:
+            allen_segmenter_ui.show_allen_segmenter_page()
+        else:
+            st.error("Allen Cell Segmenter module is not available.")
 
 def show_home_page():
     """Display the home/welcome page"""
