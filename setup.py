@@ -45,6 +45,7 @@ setup(
         "matplotlib>=3.7.0",
         "pandas>=2.0.0",
         "plotly>=5.15.0",
+        "networkx>=3.2.1",
         "scikit-image>=0.20.0",
         "opencv-python>=4.8.0",
         "tifffile>=2023.7.10",

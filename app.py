@@ -64,6 +64,7 @@ pair_correlation_function = safe_import('pair_correlation_function', 'Pair Corre
 population_analysis = safe_import('population_analysis', 'Population Analysis')
 statistics_analyzer = safe_import('statistics_analyzer', 'Statistics Analyzer')
 material_mechanics = safe_import('material_mechanics', 'Material Mechanics')
+condensate_lineage_tracking = safe_import('condensate_lineage_tracking', 'Condensate Lineage Tracking')
 
 
 # Initialize session state
@@ -190,6 +191,11 @@ def initialize_session_state():
         else:
             st.session_state.material_mechanics_analyzer = None
 
+        if condensate_lineage_tracking is not None and hasattr(condensate_lineage_tracking, 'CondensateLineageTracker'):
+            st.session_state.condensate_lineage_analyzer = condensate_lineage_tracking.CondensateLineageTracker()
+        else:
+            st.session_state.condensate_lineage_analyzer = None
+
 # Main application function
 def main():
     """Main application entry point"""
@@ -242,6 +248,7 @@ def main():
             "ICS": image_correlation_spectroscopy is not None,
             "Nuclear Biophysics": nuclear_biophysics is not None,
             "Material Mechanics": material_mechanics is not None,
+            "Condensate Lineage Tracking": condensate_lineage_tracking is not None,
             "Batch Processing": batch_processing is not None,
             "Number & Brightness": number_and_brightness is not None,
             "Pair Correlation Function": pair_correlation_function is not None,
@@ -878,6 +885,7 @@ def render_analysis_controls(context='main'):
         "Optical Flow",
         "Image Correlation Spectroscopy",
         "Displacement Correlation Spectroscopy",
+        "Condensate Lineage Tracking",
         "Material Mechanics",
         "Deformation Microscopy",
         "Two-Domain Elastography",
@@ -959,6 +967,120 @@ def render_analysis_controls(context='main'):
             else:
                 mask = st.session_state.get('segmentation_mask')
                 result = analyzer.analyze(image_data=image, nuclear_mask=mask, parameters={})
+
+    elif selected == "Condensate Lineage Tracking":
+        analyzer = st.session_state.get('condensate_lineage_analyzer')
+        if analyzer is None or condensate_lineage_tracking is None:
+            st.error("Condensate lineage tracking module unavailable.")
+        else:
+            voxel = st.session_state.get('voxel_size')
+            default_px = 0.1
+            if isinstance(voxel, (tuple, list, np.ndarray)) and len(voxel) > 0:
+                try:
+                    default_px = float(voxel[-1])
+                except Exception:
+                    default_px = 0.1
+            elif isinstance(voxel, (float, int)):
+                default_px = float(voxel)
+
+            c1, c2 = st.columns(2)
+            with c1:
+                pixel_size_um = st.number_input(
+                    "Pixel size (um/pixel)",
+                    min_value=0.001,
+                    value=float(default_px),
+                    format="%.4f",
+                    key=f'{context}_cl_px',
+                )
+            with c2:
+                time_interval_s = st.number_input(
+                    "Frame interval (s)",
+                    min_value=0.001,
+                    value=1.0,
+                    format="%.4f",
+                    key=f'{context}_cl_dt',
+                )
+
+            run_fusion = st.checkbox("Analyze fusion kinetics (tau)", value=True, key=f'{context}_cl_run_fusion')
+            run_growth = st.checkbox("Analyze growth regimes (beta)", value=True, key=f'{context}_cl_run_growth')
+            run_wetting = st.checkbox("Analyze wetting/contact angle", value=False, key=f'{context}_cl_run_wetting')
+            use_nuclear_mask = st.checkbox(
+                "Restrict segmentation with current mask",
+                value=st.session_state.get('segmentation_mask') is not None,
+                key=f'{context}_cl_use_nmask',
+            )
+            use_boundary_mask = st.checkbox(
+                "Use current mask as boundary (for wetting)",
+                value=run_wetting and st.session_state.get('segmentation_mask') is not None,
+                key=f'{context}_cl_use_bmask',
+            )
+
+            with st.expander("Advanced Lineage Parameters"):
+                threshold_mode = st.selectbox("Threshold mode", ["otsu", "percentile"], index=0, key=f'{context}_cl_thr_mode')
+                threshold_percentile = st.slider(
+                    "Threshold percentile",
+                    50.0,
+                    99.5,
+                    85.0,
+                    step=0.5,
+                    key=f'{context}_cl_thr_pct',
+                )
+                smoothing_sigma = st.number_input(
+                    "Smoothing sigma",
+                    min_value=0.0,
+                    value=1.0,
+                    format="%.2f",
+                    key=f'{context}_cl_sigma',
+                )
+                h_maxima_h = st.number_input(
+                    "H-maxima h",
+                    min_value=0.001,
+                    value=0.08,
+                    format="%.3f",
+                    key=f'{context}_cl_hmax',
+                )
+                min_area_px = st.number_input("Min object area (px)", min_value=2, value=12, key=f'{context}_cl_min_area')
+                iou_threshold = st.slider("IoU link threshold", 0.01, 0.95, 0.08, step=0.01, key=f'{context}_cl_iou')
+                mass_tolerance = st.slider(
+                    "Mass conservation tolerance",
+                    0.05,
+                    0.60,
+                    0.25,
+                    step=0.01,
+                    key=f'{context}_cl_mass_tol',
+                )
+                min_track_length = st.slider("Min growth track length", 3, 40, 6, key=f'{context}_cl_min_track')
+                fusion_lookahead = st.slider("Fusion lookahead frames", 5, 40, 20, key=f'{context}_cl_fusion_look')
+
+            if st.button("Run Condensate Lineage Tracking", key=f'{context}_run_cl'):
+                if image.ndim != 3:
+                    st.error("Condensate lineage tracking requires a time sequence (T, Y, X).")
+                else:
+                    nmask = st.session_state.get('segmentation_mask') if use_nuclear_mask else None
+                    bmask = st.session_state.get('segmentation_mask') if (run_wetting and use_boundary_mask) else None
+                    st.session_state.condensate_lineage_analyzer = condensate_lineage_tracking.CondensateLineageTracker(
+                        pixel_size_um=float(pixel_size_um),
+                        time_interval_s=float(time_interval_s),
+                    )
+                    result = st.session_state.condensate_lineage_analyzer.analyze(
+                        image_stack=image,
+                        nuclear_mask=nmask,
+                        boundary_mask=bmask,
+                        parameters={
+                            'run_fusion_analysis': run_fusion,
+                            'run_growth_analysis': run_growth,
+                            'run_wetting_analysis': run_wetting,
+                            'threshold_mode': threshold_mode,
+                            'threshold_percentile': float(threshold_percentile),
+                            'segmentation_smoothing_sigma': float(smoothing_sigma),
+                            'h_maxima_h': float(h_maxima_h),
+                            'min_area_px': int(min_area_px),
+                            'iou_threshold': float(iou_threshold),
+                            'mass_tolerance': float(mass_tolerance),
+                            'growth_min_track_length': int(min_track_length),
+                            'fusion_lookahead_frames': int(fusion_lookahead),
+                        },
+                    )
 
     elif selected == "Material Mechanics":
         analyzer = st.session_state.get('material_mechanics_analyzer')
@@ -1144,6 +1266,72 @@ def render_analysis_controls(context='main'):
         summary = latest.get('summary', {})
         if summary:
             st.json(summary)
+    elif selected == "Condensate Lineage Tracking":
+        summary = latest.get('summary', {})
+        overview = latest.get('segmentation_overview', {})
+        if summary:
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Nodes", f"{summary.get('num_nodes', 0)}")
+            m2.metric("Edges", f"{summary.get('num_edges', 0)}")
+            m3.metric("Fusions", f"{summary.get('num_fusions', 0)}")
+            m4.metric("Fissions", f"{summary.get('num_fissions', 0)}")
+            m5, m6, m7 = st.columns(3)
+            m5.metric("Nucleations", f"{summary.get('num_nucleations', 0)}")
+            m6.metric("Mass-valid fusions", f"{summary.get('num_mass_valid_fusions', 0)}")
+            m7.metric("Mean objects/frame", f"{overview.get('mean_objects_per_frame', 0):.2f}")
+
+        fusion_events = latest.get('fusion_events', [])
+        if fusion_events:
+            st.subheader("Fusion Kinetics")
+            fusion_df = pd.DataFrame(
+                [
+                    {
+                        "frame": ev.get("frame"),
+                        "num_parents": ev.get("num_parents"),
+                        "tau_s": ev.get("relaxation_time_tau_s"),
+                        "radius_um": ev.get("radius_um"),
+                        "tau_over_radius": ev.get("viscosity_proxy_tau_over_radius"),
+                        "fit_r_squared": ev.get("fit_r_squared"),
+                    }
+                    for ev in fusion_events
+                ]
+            )
+            st.dataframe(fusion_df, use_container_width=True)
+
+        growth_tracks = latest.get('growth_tracks', [])
+        if growth_tracks:
+            st.subheader("Growth Regimes")
+            growth_df = pd.DataFrame(
+                [
+                    {
+                        "track_id": tr.get("track_id"),
+                        "start_frame": tr.get("start_frame"),
+                        "end_frame": tr.get("end_frame"),
+                        "points": tr.get("num_points"),
+                        "beta": tr.get("beta"),
+                        "regime": tr.get("regime"),
+                        "terminal_radius_um": tr.get("terminal_radius_um"),
+                        "fit_r_squared": tr.get("fit_r_squared"),
+                    }
+                    for tr in growth_tracks
+                ]
+            )
+            st.dataframe(growth_df, use_container_width=True)
+
+        wetting_events = latest.get('wetting_events', [])
+        if wetting_events:
+            st.subheader("Wetting Analysis")
+            wetting_df = pd.DataFrame(
+                [
+                    {
+                        "frame": ev.get("frame"),
+                        "contact_angle_deg": ev.get("contact_angle_deg"),
+                        "wetting_class": ev.get("wetting_class"),
+                    }
+                    for ev in wetting_events
+                ]
+            )
+            st.dataframe(wetting_df, use_container_width=True)
     elif selected == "Material Mechanics":
         all_results = latest.get('results', {})
         summary = latest.get('summary', {})
