@@ -175,6 +175,14 @@ class AIEnhancementManager:
         psf /= np.sum(psf)
         return psf
 
+    def _run_richardson_lucy(self, image_float: np.ndarray, psf: np.ndarray, iterations: int, clip: bool = True) -> np.ndarray:
+        """Call scikit-image Richardson-Lucy with compatibility across versions."""
+        try:
+            return restoration.richardson_lucy(image_float, psf, num_iter=iterations, clip=clip)
+        except TypeError:
+            # Older versions of scikit-image used `iterations` instead of `num_iter`.
+            return restoration.richardson_lucy(image_float, psf, iterations=iterations, clip=clip)
+
     def _apply_nlm_denoising(self, image_data: np.ndarray, 
                            parameters: Dict[str, Any]) -> Dict[str, Any]:
         """Apply non-local means denoising using scikit-image"""
@@ -216,7 +224,7 @@ class AIEnhancementManager:
             iterations = parameters.get('iterations', 30)
             psf = self._generate_psf(image_data.shape, parameters.get('psf_size', 5), parameters.get('psf_sigma', 1.0))
             
-            deconvolved = restoration.richardson_lucy(image_float, psf, iterations=iterations)
+            deconvolved = self._run_richardson_lucy(image_float, psf, iterations=iterations)
             
             enhanced = (deconvolved * (np.iinfo(image_data.dtype).max if np.issubdtype(image_data.dtype, np.integer) else 1)).astype(image_data.dtype)
             
@@ -237,7 +245,7 @@ class AIEnhancementManager:
             lambda_tv = parameters.get('lambda_tv', 0.002)
             psf = self._generate_psf(image_data.shape, parameters.get('psf_size', 5), parameters.get('psf_sigma', 1.0))
 
-            deconvolved = restoration.richardson_lucy(image_float, psf, iterations=iterations, clip=False)
+            deconvolved = self._run_richardson_lucy(image_float, psf, iterations=iterations, clip=False)
             
             for _ in range(iterations):
                 convolved = convolve(deconvolved, psf, mode='same')
