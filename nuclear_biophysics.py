@@ -8,6 +8,9 @@ import pandas as pd
 from scipy import optimize, ndimage
 from typing import Dict, Any, Tuple, Optional, List
 import warnings
+from correlation_utils import acf_fft
+from number_and_brightness import NumberAndBrightness
+from image_correlation_spectroscopy import ImageCorrelationSpectroscopy
 
 try:
     import trackpy as tp
@@ -35,6 +38,8 @@ class NuclearBiophysicsAnalyzer:
     def __init__(self):
         self.name = "Nuclear Biophysics Analyzer"
         self.available_methods = self._check_available_methods()
+        self._nb_analyzer = NumberAndBrightness()
+        self._ics_analyzer = ImageCorrelationSpectroscopy()
     
     def _check_available_methods(self) -> Dict[str, bool]:
         """Check which nuclear analysis methods are available"""
@@ -61,13 +66,23 @@ class NuclearBiophysicsAnalyzer:
             pixel_size = parameters.get('pixel_size', 0.1)  # μm
             time_interval = parameters.get('time_interval', 0.1)  # seconds
             use_two_component = parameters.get('two_component_model', True)
+            mode = parameters.get('mode', 'roi_mean')
+            intensity_weighted = bool(parameters.get('intensity_weighted', False))
+            max_lag_frames = parameters.get('max_lag_frames', None)
             
             # Apply nuclear mask to image data
             masked_data = self._apply_nuclear_mask(image_data, nuclear_mask)
             
             # Calculate correlation functions within nucleus
             correlation_results = self._calculate_nuclear_correlations(
-                masked_data, pixel_size, time_interval, use_two_component
+                masked_data=masked_data,
+                nuclear_mask=nuclear_mask,
+                pixel_size=pixel_size,
+                time_interval=time_interval,
+                use_two_component=use_two_component,
+                mode=mode,
+                intensity_weighted=intensity_weighted,
+                max_lag_frames=max_lag_frames
             )
             
             # Analyze binding kinetics
@@ -85,6 +100,8 @@ class NuclearBiophysicsAnalyzer:
                 'binding_kinetics': binding_analysis,
                 'diffusion_maps': diffusion_maps,
                 'nuclear_mask': nuclear_mask,
+                'experimental': True,
+                'validation_note': 'Two-component temporal correlation fit is experimental and should not be interpreted as a direct kinetic binding model without additional validation.',
                 'parameters_used': parameters
             }
             
@@ -111,10 +128,10 @@ class NuclearBiophysicsAnalyzer:
             masked_data = self._apply_nuclear_mask(image_data, nuclear_mask)
             
             # Number & Brightness analysis for oligomerization
-            nb_results = self._calculate_nuclear_nb(masked_data)
+            nb_results = self._calculate_nuclear_nb(masked_data, nuclear_mask)
             
             # iMSD analysis for chromatin mobility
-            imsd_results = self._calculate_nuclear_imsd(masked_data, parameters)
+            imsd_results = self._calculate_nuclear_imsd(masked_data, nuclear_mask, parameters)
             
             # Texture analysis for chromatin organization
             texture_results = self._analyze_chromatin_texture(masked_data)
@@ -204,46 +221,149 @@ class NuclearBiophysicsAnalyzer:
         return masked_data
     
     def _calculate_nuclear_correlations(self, masked_data: np.ndarray,
-                                      pixel_size: float, time_interval: float,
-                                      use_two_component: bool) -> Dict[str, Any]:
-        """Calculate FCS correlations within nuclear region"""
-        
-        # Extract nuclear pixels only
-        nuclear_pixels = []
-        T = masked_data.shape[0]
-        
-        for t in range(T):
-            frame = masked_data[t] if masked_data.ndim == 3 else masked_data[t, :, :, 0]
-            nuclear_coords = np.where(frame > 0)
-            if len(nuclear_coords[0]) > 0:
-                nuclear_pixels.append(frame[nuclear_coords])
-        
-        if not nuclear_pixels:
-            raise ValueError("No nuclear signal detected")
-        
-        # Calculate autocorrelation for nuclear region
-        correlation_curves = []
-        for pixel_trace in nuclear_pixels:
-            if len(pixel_trace) > 10:  # Minimum points for correlation
-                tau, corr = self._calculate_autocorrelation(pixel_trace, time_interval)
-                correlation_curves.append((tau, corr))
-        
-        # Fit FCS models
-        fitting_results = []
-        for tau, corr in correlation_curves:
+                                      nuclear_mask: np.ndarray,
+                                      pixel_size: float,
+                                      time_interval: float,
+                                      use_two_component: bool,
+                                      mode: str = "roi_mean",
+                                      intensity_weighted: bool = False,
+                                      max_lag_frames: Optional[int] = None) -> Dict[str, Any]:
+        """Calculate temporal correlations within nuclear mask.
+
+        Modes
+        -----
+        roi_mean:
+            Single trace from ROI mean intensity over time.
+        pixelwise_mean_acf:
+            ACF per pixel trace, then mean ACF across pixels.
+        pixelwise_fit_map:
+            Pixel-wise ACF and per-pixel fit maps (slow/experimental).
+        """
+        if masked_data.ndim == 4:
+            data_tyx = masked_data[..., 0]
+        elif masked_data.ndim == 3:
+            data_tyx = masked_data
+        else:
+            raise ValueError("Data must be 3D (T,Y,X) or 4D (T,Y,X,C)")
+
+        if nuclear_mask.shape != data_tyx.shape[1:]:
+            raise ValueError("nuclear_mask shape must match spatial dimensions of image data")
+
+        coords = np.argwhere(nuclear_mask)
+        if coords.size == 0:
+            raise ValueError("nuclear_mask contains no True pixels")
+
+        T = data_tyx.shape[0]
+        if T < 8:
+            raise ValueError("Insufficient frames for temporal correlation analysis")
+
+        y_idx = coords[:, 0]
+        x_idx = coords[:, 1]
+        traces = data_tyx[:, y_idx, x_idx].T  # (n_pixels, T)
+        trace_means = traces.mean(axis=1)
+        valid_trace_mask = np.isfinite(trace_means) & (trace_means > 0)
+        traces = traces[valid_trace_mask]
+
+        if traces.shape[0] == 0:
+            raise ValueError("No valid masked pixel traces with positive mean intensity")
+
+        max_lag = max(4, min(T // 4, 100))
+        if max_lag_frames is not None:
+            max_lag = int(max(2, min(max_lag, max_lag_frames)))
+
+        tau_s = np.arange(max_lag) * time_interval
+
+        mode = str(mode).lower()
+        correlation_curves: List[Tuple[np.ndarray, np.ndarray]] = []
+        fitting_results: List[Dict[str, Any]] = []
+        per_pixel_fit_map: Optional[Dict[str, np.ndarray]] = None
+
+        if mode == "roi_mean":
+            roi_trace = data_tyx[:, nuclear_mask].mean(axis=1)
+            _, G = self._calculate_autocorrelation(roi_trace, time_interval)
+            G = G[:max_lag]
+            correlation_curves.append((tau_s, G))
             if use_two_component:
-                fit_result = self._fit_two_component_fcs(tau, corr, pixel_size, time_interval)
+                fit_result = self._fit_two_component_fcs(tau_s, G, pixel_size, time_interval)
             else:
-                fit_result = self._fit_single_component_fcs(tau, corr, pixel_size, time_interval)
-            
-            if fit_result['status'] == 'success':
+                fit_result = self._fit_single_component_fcs(tau_s, G, pixel_size, time_interval)
+            if fit_result.get('status') == 'success':
                 fitting_results.append(fit_result)
-        
-        return {
+
+        elif mode in ("pixelwise_mean_acf", "pixelwise_fit_map"):
+            acfs = []
+            weights = []
+            for tr in traces:
+                _, G = self._calculate_autocorrelation(tr, time_interval)
+                G = G[:max_lag]
+                if np.all(np.isfinite(G)):
+                    acfs.append(G)
+                    weights.append(float(np.mean(tr)))
+
+            if not acfs:
+                raise ValueError("No valid ACF traces in masked region")
+
+            acf_arr = np.vstack(acfs)
+            if intensity_weighted:
+                w = np.asarray(weights, dtype=float)
+                w = np.clip(w, 0, np.inf)
+                if np.sum(w) <= 0:
+                    w = np.ones_like(w)
+                G_mean = np.average(acf_arr, axis=0, weights=w)
+            else:
+                G_mean = acf_arr.mean(axis=0)
+
+            correlation_curves.append((tau_s, G_mean))
+            if use_two_component:
+                fit_result = self._fit_two_component_fcs(tau_s, G_mean, pixel_size, time_interval)
+            else:
+                fit_result = self._fit_single_component_fcs(tau_s, G_mean, pixel_size, time_interval)
+            if fit_result.get('status') == 'success':
+                fitting_results.append(fit_result)
+
+            if mode == "pixelwise_fit_map":
+                H, W = data_tyx.shape[1:]
+                tau_char_map = np.full((H, W), np.nan, dtype=float)
+                D_char_map = np.full((H, W), np.nan, dtype=float)
+                for idx, tr in enumerate(traces):
+                    _, G = self._calculate_autocorrelation(tr, time_interval)
+                    G = G[:max_lag]
+                    fr = self._fit_single_component_fcs(tau_s, G, pixel_size, time_interval)
+                    if fr.get('status') == 'success':
+                        y = int(coords[valid_trace_mask][idx, 0])
+                        x = int(coords[valid_trace_mask][idx, 1])
+                        tau_char_map[y, x] = fr.get('tau_char_s', np.nan)
+                        D_char_map[y, x] = fr.get('diffusion_coefficient_um2_s', np.nan)
+                per_pixel_fit_map = {
+                    'tau_char_s_map': tau_char_map,
+                    'diffusion_coefficient_um2_s_map': D_char_map
+                }
+        else:
+            raise ValueError(f"Unknown correlation mode: {mode}")
+
+        G_mean = correlation_curves[0][1]
+        qc = {
+            'fraction_masked_pixels_used': float(traces.shape[0] / max(1, coords.shape[0])),
+            'mean_intensity': float(np.mean(data_tyx[:, nuclear_mask])),
+            'drift_metric_cv_roi_mean': float(
+                np.std(data_tyx[:, nuclear_mask].mean(axis=1)) / (np.mean(data_tyx[:, nuclear_mask].mean(axis=1)) + 1e-12)
+            ),
+            'mode': mode,
+            'intensity_weighted': bool(intensity_weighted)
+        }
+
+        out = {
+            'tau_s': tau_s,
+            'G_mean': G_mean,
+            'n_traces_used': int(1 if mode == 'roi_mean' else traces.shape[0]),
             'correlation_curves': correlation_curves,
             'fitting_results': fitting_results,
-            'average_results': self._average_fcs_results(fitting_results)
+            'average_results': self._average_fcs_results(fitting_results),
+            'qc': qc
         }
+        if per_pixel_fit_map is not None:
+            out['pixelwise_fit_maps'] = per_pixel_fit_map
+        return out
     
     def _fit_two_component_fcs(self, tau: np.ndarray, correlation: np.ndarray,
                               pixel_size: float, time_interval: float) -> Dict[str, Any]:
@@ -286,12 +406,15 @@ class NuclearBiophysicsAnalyzer:
                 'status': 'success',
                 'model_type': 'two_component',
                 'N': N_fitted,
-                'free_fraction': F_free_fitted,
-                'bound_fraction': 1.0 - F_free_fitted,
-                'D_free': D_free,
-                'D_bound': D_bound,
-                'tau_free': tau_free_fitted,
-                'tau_bound': tau_bound_fitted,
+                'fraction_fast_component': F_free_fitted,
+                'fraction_slow_component': 1.0 - F_free_fitted,
+                'diffusion_fast_um2_s': D_free,
+                'diffusion_slow_um2_s': D_bound,
+                'tau_fast_s': tau_free_fitted,
+                'tau_slow_s': tau_bound_fitted,
+                'tau_char_s': tau_free_fitted,
+                'experimental': True,
+                'validation_note': 'Two-component diffusion fit is not a directly identifiable binding kinetics model.',
                 'parameter_errors': np.sqrt(np.diag(pcov)),
                 'fitted_curve': fcs_model_two_component(tau, *popt)
             }
@@ -327,8 +450,9 @@ class NuclearBiophysicsAnalyzer:
                 'status': 'success',
                 'model_type': 'single_component',
                 'N': N_fitted,
-                'diffusion_coefficient': D,
-                'tau_diff': tau_diff_fitted,
+                'diffusion_coefficient_um2_s': D,
+                'tau_char_s': tau_diff_fitted,
+                'experimental': True,
                 'parameter_errors': np.sqrt(np.diag(pcov)),
                 'fitted_curve': fcs_model(tau, *popt)
             }
@@ -337,131 +461,59 @@ class NuclearBiophysicsAnalyzer:
             return {'status': 'error', 'message': str(e)}
     
     def _calculate_autocorrelation(self, trace: np.ndarray, time_interval: float) -> Tuple[np.ndarray, np.ndarray]:
-        """Calculate normalized autocorrelation function"""
-        
+        """Calculate FCS-style ACF: <deltaI(t)deltaI(t+tau)> / <I>^2."""
         n = len(trace)
-        max_lag = min(n // 4, 100)  # Maximum lag time
-        
-        # Normalize trace
-        mean_val = np.mean(trace)
-        if mean_val > 0:
-            normalized_trace = (trace - mean_val) / mean_val
-        else:
-            normalized_trace = trace
-        
-        # Calculate autocorrelation
-        correlation = np.correlate(normalized_trace, normalized_trace, mode='full')
-        correlation = correlation[correlation.size // 2:]
-        correlation = correlation[:max_lag] / correlation[0]  # Normalize
-        
-        # Time axis
+        max_lag = max(4, min(n // 4, 100))
+        correlation = acf_fft(np.asarray(trace, dtype=float))[:max_lag]
         tau = np.arange(max_lag) * time_interval
-        
         return tau, correlation
     
-    def _calculate_nuclear_nb(self, masked_data: np.ndarray) -> Dict[str, Any]:
-        """Calculate Number & Brightness for nuclear region"""
-        
-        if masked_data.ndim == 3:  # T, Y, X
-            # Calculate mean and variance for each pixel over time
-            mean_intensity = np.mean(masked_data, axis=0)
-            var_intensity = np.var(masked_data, axis=0)
-        else:
+    def _calculate_nuclear_nb(self, masked_data: np.ndarray, nuclear_mask: np.ndarray) -> Dict[str, Any]:
+        """Calculate Number & Brightness for nuclear region using shared analyzer."""
+        if masked_data.ndim != 3:
             raise ValueError("N&B analysis requires 3D data (T,Y,X)")
-        
-        # Calculate brightness (variance/mean)
-        with np.errstate(divide='ignore', invalid='ignore'):
-            brightness = np.divide(var_intensity, mean_intensity, 
-                                 out=np.zeros_like(var_intensity), 
-                                 where=mean_intensity > 0)
-        
-        # Calculate number of molecules (mean²/variance)
-        with np.errstate(divide='ignore', invalid='ignore'):
-            number = np.divide(mean_intensity**2, var_intensity,
-                              out=np.zeros_like(mean_intensity),
-                              where=var_intensity > 0)
-        
-        # Only analyze nuclear pixels (non-zero)
-        nuclear_mask = mean_intensity > 0
-        
+
+        nb = self._nb_analyzer.analyze(masked_data, roi_mask=nuclear_mask)
+        if nb.get('status') != 'success':
+            raise ValueError(nb.get('message', 'N&B failed'))
+
+        brightness_map = np.where(nuclear_mask, nb['brightness_map'], np.nan)
+        number_map = np.where(nuclear_mask, nb['number_map'], np.nan)
+
         return {
-            'brightness_map': brightness,
-            'number_map': number,
-            'mean_brightness': np.mean(brightness[nuclear_mask]) if np.any(nuclear_mask) else 0,
-            'mean_number': np.mean(number[nuclear_mask]) if np.any(nuclear_mask) else 0,
-            'oligomerization_index': np.mean(brightness[nuclear_mask]) if np.any(nuclear_mask) else 0
+            **nb,
+            'brightness_map': brightness_map,
+            'number_map': number_map,
+            'mean_brightness': float(np.nanmean(brightness_map)) if np.any(nuclear_mask) else 0.0,
+            'mean_number': float(np.nanmean(number_map)) if np.any(nuclear_mask) else 0.0,
+            'oligomerization_index': float(np.nanmean(brightness_map)) if np.any(nuclear_mask) else 0.0,
+            'experimental': True
         }
     
-    def _calculate_nuclear_imsd(self, masked_data: np.ndarray, 
+    def _calculate_nuclear_imsd(self, masked_data: np.ndarray,
+                               nuclear_mask: np.ndarray,
                                parameters: Dict[str, Any]) -> Dict[str, Any]:
-        """Calculate image Mean Square Displacement for chromatin mobility"""
-        
-        pixel_size = parameters.get('pixel_size', 0.1)
-        time_interval = parameters.get('time_interval', 0.1)
-        max_lag = min(masked_data.shape[0] // 4, 20)
-        
+        """Calculate nuclear iMSD via STICS Gaussian-variance approach."""
         if masked_data.ndim != 3:
             raise ValueError("iMSD analysis requires 3D data (T,Y,X)")
-        
-        T, H, W = masked_data.shape
-        msd_maps = []
-        
-        # Calculate MSD for different lag times
-        for lag in range(1, max_lag + 1):
-            msd_map = np.zeros((H, W))
-            valid_pixels = np.zeros((H, W), dtype=bool)
-            
-            for y in range(H):
-                for x in range(W):
-                    if np.any(masked_data[:, y, x] > 0):  # Nuclear pixel
-                        trace = masked_data[:, y, x]
-                        if np.std(trace) > 0:  # Has variation
-                            # Calculate MSD for this pixel
-                            squared_displacements = []
-                            for t in range(T - lag):
-                                displacement = trace[t + lag] - trace[t]
-                                squared_displacements.append(displacement**2)
-                            
-                            if squared_displacements:
-                                msd_map[y, x] = np.mean(squared_displacements)
-                                valid_pixels[y, x] = True
-            
-            msd_maps.append(msd_map)
-        
-        # Calculate diffusion coefficient map from linear fit
-        diffusion_map = np.zeros((H, W))
-        anomalous_exponent = np.zeros((H, W))
-        
-        lag_times = np.arange(1, max_lag + 1) * time_interval
-        
-        for y in range(H):
-            for x in range(W):
-                if np.any([msd_map[y, x] > 0 for msd_map in msd_maps]):
-                    msd_values = [msd_map[y, x] for msd_map in msd_maps]
-                    
-                    # Fit MSD vs time: MSD = 4Dt^α
-                    try:
-                        log_msd = np.log(np.array(msd_values) + 1e-10)
-                        log_time = np.log(lag_times)
-                        
-                        # Linear fit in log space
-                        coeffs = np.polyfit(log_time, log_msd, 1)
-                        alpha = coeffs[0]  # Anomalous exponent
-                        log_D = (coeffs[1] - np.log(4)) / alpha  # Diffusion coefficient
-                        
-                        diffusion_map[y, x] = np.exp(log_D) * (pixel_size**2)
-                        anomalous_exponent[y, x] = alpha
-                        
-                    except:
-                        continue
-        
-        return {
-            'msd_maps': msd_maps,
-            'diffusion_map': diffusion_map,
-            'anomalous_exponent': anomalous_exponent,
-            'mean_diffusion': np.mean(diffusion_map[diffusion_map > 0]),
-            'mean_anomalous_exponent': np.mean(anomalous_exponent[anomalous_exponent > 0])
-        }
+
+        max_temporal_lag = int(parameters.get('max_temporal_lag', min(masked_data.shape[0] // 4, 20)))
+        max_spatial_lag = int(parameters.get('max_spatial_lag', 6))
+        fit_radius = int(parameters.get('imsd_fit_radius', max_spatial_lag))
+        pixel_size = float(parameters.get('pixel_size', 0.1))
+        time_interval = float(parameters.get('time_interval', 0.1))
+
+        imsd = self._ics_analyzer.compute_imsd_stics(
+            image_stack=masked_data,
+            mask=nuclear_mask,
+            max_temporal_lag=max_temporal_lag,
+            max_spatial_lag=max_spatial_lag,
+            pixel_size_um=pixel_size,
+            time_interval_s=time_interval,
+            fit_radius=fit_radius
+        )
+        imsd['experimental'] = True
+        return imsd
     
     def _analyze_chromatin_texture(self, masked_data: np.ndarray) -> Dict[str, Any]:
         """Analyze chromatin texture using Fourier analysis"""
@@ -771,75 +823,81 @@ class NuclearBiophysicsAnalyzer:
         
         if two_component_fits:
             averaged_results['two_component'] = {
-                'mean_free_fraction': np.mean([fit['free_fraction'] for fit in two_component_fits]),
-                'mean_bound_fraction': np.mean([fit['bound_fraction'] for fit in two_component_fits]),
-                'mean_D_free': np.mean([fit['D_free'] for fit in two_component_fits]),
-                'mean_D_bound': np.mean([fit['D_bound'] for fit in two_component_fits]),
-                'std_free_fraction': np.std([fit['free_fraction'] for fit in two_component_fits]),
+                'mean_fraction_fast_component': np.mean([fit['fraction_fast_component'] for fit in two_component_fits]),
+                'mean_fraction_slow_component': np.mean([fit['fraction_slow_component'] for fit in two_component_fits]),
+                'mean_diffusion_fast_um2_s': np.mean([fit['diffusion_fast_um2_s'] for fit in two_component_fits]),
+                'mean_diffusion_slow_um2_s': np.mean([fit['diffusion_slow_um2_s'] for fit in two_component_fits]),
+                'mean_tau_fast_s': np.mean([fit['tau_fast_s'] for fit in two_component_fits]),
+                'mean_tau_slow_s': np.mean([fit['tau_slow_s'] for fit in two_component_fits]),
+                'std_fraction_fast_component': np.std([fit['fraction_fast_component'] for fit in two_component_fits]),
                 'n_fits': len(two_component_fits)
             }
         
         if single_component_fits:
             averaged_results['single_component'] = {
-                'mean_diffusion_coefficient': np.mean([fit['diffusion_coefficient'] for fit in single_component_fits]),
-                'std_diffusion_coefficient': np.std([fit['diffusion_coefficient'] for fit in single_component_fits]),
+                'mean_diffusion_coefficient_um2_s': np.mean([fit['diffusion_coefficient_um2_s'] for fit in single_component_fits]),
+                'std_diffusion_coefficient_um2_s': np.std([fit['diffusion_coefficient_um2_s'] for fit in single_component_fits]),
+                'mean_tau_char_s': np.mean([fit['tau_char_s'] for fit in single_component_fits]),
                 'n_fits': len(single_component_fits)
             }
         
         return averaged_results
     
     def _analyze_binding_kinetics(self, correlation_results: Dict[str, Any]) -> Dict[str, Any]:
-        """Analyze binding kinetics from FCS results"""
+        """Summarize characteristic times from temporal correlation fits.
+
+        Note: this does not provide a validated reaction-kinetics binding estimate.
+        """
         
         average_results = correlation_results.get('average_results', {})
         
         if 'two_component' in average_results:
             two_comp = average_results['two_component']
-            
-            # Calculate binding parameters
-            free_fraction = two_comp['mean_free_fraction']
-            bound_fraction = two_comp['mean_bound_fraction']
-            D_free = two_comp['mean_D_free']
-            D_bound = two_comp['mean_D_bound']
-            
-            # Estimate binding affinity (simplified)
-            binding_ratio = bound_fraction / (free_fraction + 1e-10)
-            mobility_ratio = D_free / (D_bound + 1e-10)
-            
+
+            frac_fast = two_comp['mean_fraction_fast_component']
+            frac_slow = two_comp['mean_fraction_slow_component']
+            D_fast = two_comp['mean_diffusion_fast_um2_s']
+            D_slow = two_comp['mean_diffusion_slow_um2_s']
+
             return {
-                'free_fraction': free_fraction,
-                'bound_fraction': bound_fraction,
-                'binding_ratio': binding_ratio,
-                'mobility_ratio': mobility_ratio,
-                'binding_strength': 'Strong' if binding_ratio > 1 else 'Weak',
-                'D_free': D_free,
-                'D_bound': D_bound
+                'fraction_fast_component': frac_fast,
+                'fraction_slow_component': frac_slow,
+                'diffusion_fast_um2_s': D_fast,
+                'diffusion_slow_um2_s': D_slow,
+                'tau_fast_s': two_comp.get('mean_tau_fast_s', np.nan),
+                'tau_slow_s': two_comp.get('mean_tau_slow_s', np.nan),
+                'characteristic_correlation_time_s': two_comp.get('mean_tau_fast_s', np.nan),
+                'experimental': True,
+                'validation_note': 'Do not interpret as direct binding kinetics without a validated reaction-diffusion model and identifiability analysis.'
+            }
+        if 'single_component' in average_results:
+            single = average_results['single_component']
+            return {
+                'diffusion_coefficient_um2_s': single.get('mean_diffusion_coefficient_um2_s', np.nan),
+                'characteristic_correlation_time_s': single.get('mean_tau_char_s', np.nan),
+                'experimental': True,
+                'validation_note': 'Single-component fit reports characteristic temporal correlation only.'
             }
         else:
-            return {'binding_analysis': 'Two-component model required for binding analysis'}
+            return {'binding_analysis': 'No successful temporal correlation fits'}
     
     def _generate_nuclear_diffusion_maps(self, correlation_results: Dict[str, Any],
                                        nuclear_mask: np.ndarray) -> Dict[str, Any]:
         """Generate spatial maps of diffusion parameters within nucleus"""
-        
-        # This would require spatial FCS analysis
-        # For now, return summary statistics
-        average_results = correlation_results.get('average_results', {})
-        
-        diffusion_map = np.zeros_like(nuclear_mask, dtype=float)
-        binding_map = np.zeros_like(nuclear_mask, dtype=float)
-        
-        if 'two_component' in average_results:
-            # Fill nuclear region with average values
-            # In practice, this would be calculated spatially
-            two_comp = average_results['two_component']
-            diffusion_map[nuclear_mask] = two_comp['mean_D_free']
-            binding_map[nuclear_mask] = two_comp['mean_bound_fraction']
-        
+        if 'pixelwise_fit_maps' in correlation_results:
+            maps = correlation_results['pixelwise_fit_maps']
+            return {
+                'diffusion_coefficient_um2_s_map': maps.get('diffusion_coefficient_um2_s_map'),
+                'tau_char_s_map': maps.get('tau_char_s_map'),
+                'nuclear_mask': nuclear_mask,
+                'experimental': True
+            }
+
         return {
-            'diffusion_map': diffusion_map,
-            'binding_map': binding_map,
-            'nuclear_mask': nuclear_mask
+            'nuclear_mask': nuclear_mask,
+            'maps_available': False,
+            'deprecation_note': 'Spatial maps are returned only in mode="pixelwise_fit_map". Constant placeholder maps were removed.',
+            'experimental': True
         }
 
 
@@ -851,6 +909,8 @@ def get_nuclear_analysis_parameters(method: str) -> Dict[str, Any]:
             'pixel_size': 0.1,  # μm
             'time_interval': 0.1,  # seconds
             'two_component_model': True,
+            'mode': 'roi_mean',  # roi_mean | pixelwise_mean_acf | pixelwise_fit_map
+            'intensity_weighted': False,
             'correlation_window_size': 5,  # pixels
             'max_lag_time': 10.0  # seconds
         }

@@ -20,6 +20,7 @@ import pandas as pd
 import warnings
 from dataclasses import dataclass, asdict
 from typing import Dict, Any, List, Tuple, Optional
+from correlation_utils import acf_fft
 
 # Optional dependencies
 try:
@@ -39,17 +40,8 @@ except Exception as e:  # pragma: no cover - optional
 
 
 def _acf_fft(x: np.ndarray) -> np.ndarray:
-    """ACF via FFT (biased, mean-subtracted, normalized to mean^2)."""
-    x = np.asarray(x, dtype=float)
-    mu = x.mean()
-    if mu == 0:
-        mu = 1e-12
-    x = x - mu
-    n = len(x)
-    f = np.fft.rfft(x, n=2 * n)
-    s = np.fft.irfft(f * np.conjugate(f))[:n]
-    norm = (np.arange(n, 0, -1) * (mu ** 2))
-    return (s / norm).real
+    """Backward-compatible alias for shared ACF utility."""
+    return acf_fft(x)
 
 
 def _r2(y, yhat):

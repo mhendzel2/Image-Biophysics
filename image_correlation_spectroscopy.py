@@ -947,45 +947,240 @@ class ImageCorrelationSpectroscopy:
             return {'status': 'error', 'message': f'Cross-correlation ICS failed: {str(e)}'}
     
     def _analyze_imsd_ics(self, image_data: np.ndarray, parameters: Dict[str, Any]) -> Dict[str, Any]:
-        """Image Mean Square Displacement via ICS methods"""
+        """Image Mean Square Displacement via STICS Gaussian-variance method."""
         try:
             if image_data.ndim != 3:
                 return {'status': 'error', 'message': 'iMSD via ICS requires time series data'}
-            
-            max_lag = parameters.get('max_temporal_lag', 20)
-            pixel_size = parameters.get('pixel_size', 0.1)
-            time_interval = parameters.get('time_interval', 0.1)
-            
-            T, H, W = image_data.shape
-            
-            # Calculate MSD for each pixel using correlation approach
-            msd_map = np.zeros((H, W))
-            
-            for y in range(H):
-                for x in range(W):
-                    pixel_trace = image_data[:, y, x]
-                    msd_curve = self._calculate_pixel_msd_ics(pixel_trace, max_lag)
-                    
-                    # Fit linear slope to get effective diffusion
-                    if len(msd_curve) > 2:
-                        time_axis = np.arange(len(msd_curve)) * time_interval
-                        slope = np.polyfit(time_axis[1:], msd_curve[1:], 1)[0]
-                        msd_map[y, x] = slope
-            
-            # Convert to diffusion coefficient map
-            diffusion_map = msd_map / 4  # 2D diffusion: MSD = 4Dt
-            
+
+            imsd = self.compute_imsd_stics(
+                image_stack=image_data,
+                mask=parameters.get('mask', None),
+                max_temporal_lag=int(parameters.get('max_temporal_lag', 20)),
+                max_spatial_lag=int(parameters.get('max_spatial_lag', 6)),
+                pixel_size_um=float(parameters.get('pixel_size', 0.1)),
+                time_interval_s=float(parameters.get('time_interval', 0.1)),
+                fit_radius=int(parameters.get('fit_radius', parameters.get('max_spatial_lag', 6)))
+            )
+            if imsd.get('status') != 'success':
+                return imsd
+
             return {
                 'status': 'success',
-                'method': 'iMSD via ICS',
-                'msd_map': msd_map,
-                'diffusion_map': diffusion_map,
-                'avg_diffusion': np.mean(diffusion_map[diffusion_map > 0]),
-                'parameters_used': parameters
+                'method': 'iMSD via ICS (STICS Gaussian variance)',
+                **imsd,
+                'parameters_used': parameters,
+                'note': 'iMSD is computed from the spatiotemporal correlation peak variance vs temporal lag.'
             }
             
         except Exception as e:
             return {'status': 'error', 'message': f'iMSD via ICS failed: {str(e)}'}
+
+    def compute_imsd_stics(self,
+                           image_stack: np.ndarray,
+                           mask: Optional[np.ndarray] = None,
+                           max_temporal_lag: int = 20,
+                           max_spatial_lag: int = 6,
+                           pixel_size_um: float = 0.1,
+                           time_interval_s: float = 0.1,
+                           fit_radius: Optional[int] = None) -> Dict[str, Any]:
+        """Compute iMSD from STICS maps by fitting Gaussian width over temporal lag.
+
+        For each lag τ, this computes G(ξ, χ, τ), fits:
+            G = A * exp(-((x-x0)^2 + (y-y0)^2) / sigma2) + B
+        and returns sigma2(τ) in µm².
+        """
+        stack = np.asarray(image_stack, dtype=float)
+        if stack.ndim != 3:
+            return {'status': 'error', 'message': 'compute_imsd_stics expects image_stack shape (T,Y,X)'}
+
+        T, H, W = stack.shape
+        if T < 6:
+            return {'status': 'error', 'message': 'Insufficient temporal frames for iMSD'}
+
+        if mask is not None:
+            mask = np.asarray(mask, dtype=bool)
+            if mask.shape != (H, W):
+                return {'status': 'error', 'message': 'mask shape must match image spatial dimensions'}
+            ys, xs = np.where(mask)
+            if ys.size == 0:
+                return {'status': 'error', 'message': 'mask has no valid pixels'}
+            y0b, y1b = int(np.min(ys)), int(np.max(ys)) + 1
+            x0b, x1b = int(np.min(xs)), int(np.max(xs)) + 1
+            stack = stack[:, y0b:y1b, x0b:x1b]
+            roi_mask = mask[y0b:y1b, x0b:x1b]
+        else:
+            roi_mask = np.ones((H, W), dtype=bool)
+
+        T, H, W = stack.shape
+        max_tau = int(max(1, min(max_temporal_lag, T - 2)))
+        max_r = int(max(2, min(max_spatial_lag, H // 2, W // 2)))
+        fit_r = int(max_r if fit_radius is None else max(2, min(fit_radius, max_r)))
+
+        # Apply mask and mean-subtracted fluctuations.
+        # Keep zero outside mask so masked pixels do not contribute to signal.
+        masked_stack = stack.copy()
+        for t in range(T):
+            masked_stack[t, ~roi_mask] = 0.0
+        roi_mean = float(np.mean(masked_stack[:, roi_mask]))
+        if abs(roi_mean) < 1e-12:
+            return {'status': 'error', 'message': 'ROI mean intensity is ~0; iMSD undefined'}
+
+        delta = np.zeros_like(masked_stack, dtype=float)
+        for t in range(T):
+            frame_vals = masked_stack[t, roi_mask]
+            frame_mean = float(np.mean(frame_vals)) if frame_vals.size else 0.0
+            delta[t] = masked_stack[t] - frame_mean
+            delta[t, ~roi_mask] = 0.0
+
+        # Precompute overlap normalization for spatial lags around center.
+        ones = roi_mask.astype(float)
+        pad_shape = (2 * H, 2 * W)
+        o_fft = fft2(ones, s=pad_shape)
+        overlap_map = fftshift(ifft2(o_fft * np.conjugate(o_fft)).real)
+        cy, cx = overlap_map.shape[0] // 2, overlap_map.shape[1] // 2
+        overlap_crop = overlap_map[cy - max_r:cy + max_r + 1, cx - max_r:cx + max_r + 1]
+        overlap_crop = np.where(overlap_crop <= 0, np.nan, overlap_crop)
+
+        spatial_maps: List[np.ndarray] = []
+        tau_s: List[float] = []
+        imsd_um2: List[float] = []
+        diagnostics: List[Dict[str, Any]] = []
+
+        for tau in range(max_tau + 1):
+            n_pairs = T - tau
+            if n_pairs <= 0:
+                continue
+
+            acc = np.zeros((2 * max_r + 1, 2 * max_r + 1), dtype=float)
+            for t in range(n_pairs):
+                f1 = delta[t]
+                f2 = delta[t + tau]
+                c_full = fftshift(ifft2(fft2(f1, s=pad_shape) * np.conjugate(fft2(f2, s=pad_shape))).real)
+                c_crop = c_full[cy - max_r:cy + max_r + 1, cx - max_r:cx + max_r + 1]
+                acc += c_crop
+
+            c_avg = acc / n_pairs
+            G = c_avg / (overlap_crop * (roi_mean ** 2))
+            G = np.nan_to_num(G, nan=0.0, posinf=0.0, neginf=0.0)
+            spatial_maps.append(G)
+
+            fit = self._fit_imsd_gaussian_peak(G, pixel_size_um=pixel_size_um, fit_radius=fit_r)
+            tau_s.append(float(tau * time_interval_s))
+            imsd_um2.append(float(fit['sigma2_um2']))
+            diagnostics.append({
+                'tau_index': int(tau),
+                'tau_s': float(tau * time_interval_s),
+                'A': float(fit['A']),
+                'B': float(fit['B']),
+                'x0_um': float(fit['x0_um']),
+                'y0_um': float(fit['y0_um']),
+                'sigma2_um2': float(fit['sigma2_um2']),
+                'r_squared': float(fit['r_squared']),
+                'residual_ss': float(fit['residual_ss']),
+                'converged': bool(fit['converged'])
+            })
+
+        tau_arr = np.asarray(tau_s, dtype=float)
+        sigma2_arr = np.asarray(imsd_um2, dtype=float)
+
+        D_um2_s = np.nan
+        intercept_um2 = np.nan
+        if len(tau_arr) >= 3:
+            valid = np.isfinite(tau_arr) & np.isfinite(sigma2_arr)
+            valid &= (tau_arr >= 0)
+            if np.sum(valid) >= 3:
+                coeff = np.polyfit(tau_arr[valid], sigma2_arr[valid], 1)
+                slope, intercept = coeff[0], coeff[1]
+                D_um2_s = float(max(0.0, slope / 4.0))
+                intercept_um2 = float(intercept)
+
+        return {
+            'status': 'success',
+            'tau_s': tau_arr,
+            'imsd_um2': sigma2_arr,
+            'stics_maps': spatial_maps,
+            'fit_diagnostics': diagnostics,
+            'diffusion_coefficient_um2_s': D_um2_s,
+            'sigma0_squared_um2': intercept_um2,
+            'model_note': 'For isotropic free diffusion, iMSD(tau) ≈ 4 D tau + sigma0^2.'
+        }
+
+    def _fit_imsd_gaussian_peak(self,
+                                G_tau: np.ndarray,
+                                pixel_size_um: float,
+                                fit_radius: int) -> Dict[str, Any]:
+        """Fit 2D Gaussian + baseline around STICS peak center to extract sigma^2."""
+        h, w = G_tau.shape
+        cy, cx = h // 2, w // 2
+        fit_radius = int(max(1, min(fit_radius, cy, cx)))
+
+        sub = G_tau[cy - fit_radius:cy + fit_radius + 1, cx - fit_radius:cx + fit_radius + 1]
+        yy, xx = np.mgrid[-fit_radius:fit_radius + 1, -fit_radius:fit_radius + 1]
+        x_um = xx * pixel_size_um
+        y_um = yy * pixel_size_um
+
+        x_flat = x_um.ravel()
+        y_flat = y_um.ravel()
+        z_flat = sub.ravel()
+
+        def model(coords, A, x0, y0, sigma2, B):
+            x, y = coords
+            return A * np.exp(-((x - x0) ** 2 + (y - y0) ** 2) / sigma2) + B
+
+        A0 = float(np.max(z_flat) - np.median(z_flat))
+        B0 = float(np.median(z_flat))
+        sigma0 = float(max((pixel_size_um ** 2), (2.0 * pixel_size_um) ** 2))
+        p0 = [max(A0, 1e-8), 0.0, 0.0, sigma0, B0]
+
+        center_bound = 0.5 * pixel_size_um
+        sigma_min = (0.25 * pixel_size_um) ** 2
+        sigma_max = (fit_radius * pixel_size_um * 3.0) ** 2
+        lb = [0.0, -center_bound, -center_bound, sigma_min, -np.inf]
+        ub = [np.inf, center_bound, center_bound, sigma_max, np.inf]
+
+        try:
+            popt, _ = optimize.curve_fit(
+                lambda coords, A, x0, y0, sigma2, B: model(coords, A, x0, y0, sigma2, B),
+                (x_flat, y_flat),
+                z_flat,
+                p0=p0,
+                bounds=(lb, ub),
+                maxfev=5000
+            )
+            yhat = model((x_flat, y_flat), *popt)
+            ss_res = float(np.sum((z_flat - yhat) ** 2))
+            ss_tot = float(np.sum((z_flat - np.mean(z_flat)) ** 2) + 1e-12)
+            r2 = float(1.0 - ss_res / ss_tot)
+            return {
+                'converged': True,
+                'A': float(popt[0]),
+                'x0_um': float(popt[1]),
+                'y0_um': float(popt[2]),
+                'sigma2_um2': float(popt[3]),
+                'B': float(popt[4]),
+                'r_squared': r2,
+                'residual_ss': ss_res
+            }
+        except Exception:
+            # Robust fallback: second-moment estimate around center.
+            z = sub - np.min(sub)
+            z = np.clip(z, 0, None)
+            wsum = float(np.sum(z))
+            if wsum <= 1e-12:
+                sigma2 = float((pixel_size_um ** 2))
+            else:
+                r2_map = x_um ** 2 + y_um ** 2
+                sigma2 = float(max(sigma_min, np.sum(z * r2_map) / wsum))
+            return {
+                'converged': False,
+                'A': float(max(A0, 0.0)),
+                'x0_um': 0.0,
+                'y0_um': 0.0,
+                'sigma2_um2': sigma2,
+                'B': float(B0),
+                'r_squared': 0.0,
+                'residual_ss': float(np.sum((z_flat - np.mean(z_flat)) ** 2))
+            }
     
     def _analyze_temporal_ics(self, image_data: np.ndarray, parameters: Dict[str, Any]) -> Dict[str, Any]:
         """Temporal Image Correlation Spectroscopy"""
@@ -1140,7 +1335,10 @@ class ImageCorrelationSpectroscopy:
             return {'pearson_r': 0, 'overlap': 0}
     
     def _calculate_pixel_msd_ics(self, trace: np.ndarray, max_lag: int) -> np.ndarray:
-        """Calculate MSD for a pixel trace using correlation approach"""
+        """Deprecated placeholder retained for backward compatibility.
+
+        NOTE: This is not iMSD. Use `compute_imsd_stics`.
+        """
         if len(trace) < max_lag:
             max_lag = len(trace) // 2
         
@@ -1316,6 +1514,8 @@ def get_ics_parameters(method: str) -> Dict[str, Any]:
         },
         'iMSD via ICS': {
             'max_temporal_lag': 20,
+            'max_spatial_lag': 6,
+            'fit_radius': 6,
             'pixel_size': 0.1,
             'time_interval': 0.1
         },
