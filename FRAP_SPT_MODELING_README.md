@@ -44,6 +44,11 @@ frap_fitting/        # Statistical fitting
 spt_models/          # SPT integration
 ├── dwell_time.py    # Dwell time analysis
 ├── state_transition.py        # Hidden Markov Models
+├── spot_on.py       # Bias-aware diffusion population inference
+├── switching_diffusion.py     # True switching diffusion HMM (EM + Viterbi)
+├── bayesian.py      # Bayesian posterior workflow (MH)
+├── trajectory_representation.py  # Synthetic + representation learning tools
+├── benchmarking.py  # Recovery/calibration metrics utilities
 └── joint_frap_spt.py          # Joint FRAP-SPT fitting
 
 notebooks/           # Demonstrations
@@ -127,6 +132,35 @@ spt_data = {
 
 # Joint fit resolves parameter degeneracies
 result = fit_joint_model(frap_data, spt_data)
+```
+
+### 4. Bias-Aware + Kinetic SPT Inference
+
+```python
+from spt_models import (
+    SpotOnConfig,
+    SpotOnLikeInference,
+    SwitchingHMMConfig,
+    SwitchingDiffusionHMM,
+)
+
+tracks_um = [...]  # list of arrays [frame, x_um, y_um]
+
+spot_cfg = SpotOnConfig(
+    frame_interval_s=0.01,
+    axial_detection_range_um=0.7,
+    localization_error_um=0.03,
+    exposure_time_s=0.005,
+    n_states=2,
+)
+spot_res = SpotOnLikeInference(spot_cfg).fit(tracks_um)
+
+hmm_cfg = SwitchingHMMConfig(
+    frame_interval_s=0.01,
+    localization_error_um=0.03,
+    n_states=2,
+)
+hmm_res = SwitchingDiffusionHMM(hmm_cfg).fit(tracks_um)
 ```
 
 ## Model Descriptions

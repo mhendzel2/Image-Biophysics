@@ -351,6 +351,118 @@ class AdvancedAnalysisManager:
             # Calculate additional metrics
             num_particles = trajectories['particle'].nunique()
             avg_trajectory_length = trajectories.groupby('particle').size().mean()
+
+            # MSD baseline (retained for comparability)
+            msd_baseline = {}
+            try:
+                lag_times = np.asarray(ensemble_msd.index, dtype=float)
+                msd_values = np.asarray(ensemble_msd.values, dtype=float)
+                fit_points = max(3, min(10, len(msd_values)))
+                if fit_points >= 2:
+                    slope, intercept = np.polyfit(lag_times[:fit_points], msd_values[:fit_points], deg=1)
+                    msd_baseline = {
+                        'fit_points': int(fit_points),
+                        'diffusion_coefficient_um2_s': float(max(slope / 4.0, 0.0)),
+                        'slope_um2_s': float(slope),
+                        'intercept_um2': float(intercept),
+                        'note': 'MSD slope baseline only; bias-aware and HMM pathways provide improved inference.'
+                    }
+            except Exception:
+                msd_baseline = {'note': 'MSD baseline fit unavailable for current trajectories.'}
+
+            # Convert linked trajectories to [frame, x_um, y_um] for advanced inference.
+            tracks_um = []
+            for _, grp in trajectories.groupby('particle'):
+                arr = grp[['frame', 'x', 'y']].to_numpy(dtype=float)
+                if arr.shape[0] < 2:
+                    continue
+                arr[:, 1:] = arr[:, 1:] * float(mpp)
+                tracks_um.append(arr)
+
+            advanced_outputs = {}
+            inference_warnings = []
+
+            # Spot-On-like bias-aware diffusion inference.
+            if parameters.get('run_bias_aware_diffusion', True):
+                try:
+                    from spt_models import SpotOnConfig, SpotOnLikeInference
+
+                    frame_interval_s = 1.0 / max(float(fps), 1e-9)
+                    spot_cfg = SpotOnConfig(
+                        frame_interval_s=frame_interval_s,
+                        axial_detection_range_um=float(parameters.get('axial_detection_range_um', 0.7)),
+                        localization_error_um=float(parameters.get('localization_error_um', 0.03)),
+                        exposure_time_s=float(parameters.get('exposure_time_s', frame_interval_s)),
+                        n_states=int(parameters.get('spot_on_n_states', 2)),
+                        max_lag_frames=int(parameters.get('spot_on_max_lag_frames', min(4, max_lagtime))),
+                        allow_gap_frames=int(memory),
+                        max_jump_um=float(search_range) * float(mpp),
+                        fit_localization_error=bool(parameters.get('spot_on_fit_localization_error', False)),
+                        fit_axial_range=bool(parameters.get('spot_on_fit_axial_range', False)),
+                        bootstrap_samples=int(parameters.get('spot_on_bootstrap_samples', 0)),
+                        random_state=parameters.get('random_state'),
+                    )
+                    spot_model = SpotOnLikeInference(spot_cfg)
+                    advanced_outputs['bias_aware_diffusion_inference'] = spot_model.fit(
+                        tracks_um,
+                        max_iter=int(parameters.get('spot_on_max_iter', 250)),
+                    )
+                except Exception as e:
+                    inference_warnings.append(f'Bias-aware diffusion inference failed: {str(e)}')
+
+            # True switching diffusion HMM for kinetic/state inference.
+            if parameters.get('run_switching_hmm', True):
+                try:
+                    from spt_models import SwitchingDiffusionHMM, SwitchingHMMConfig
+
+                    frame_interval_s = 1.0 / max(float(fps), 1e-9)
+                    hmm_cfg = SwitchingHMMConfig(
+                        frame_interval_s=frame_interval_s,
+                        localization_error_um=float(parameters.get('localization_error_um', 0.03)),
+                        exposure_time_s=float(parameters.get('exposure_time_s', frame_interval_s)),
+                        n_states=int(parameters.get('hmm_n_states', 2)),
+                        allow_gap_frames=int(memory),
+                        max_jump_um=float(search_range) * float(mpp),
+                        max_iter=int(parameters.get('hmm_max_iter', 80)),
+                        tol=float(parameters.get('hmm_tol', 1e-5)),
+                        fit_localization_error=bool(parameters.get('hmm_fit_localization_error', False)),
+                        bootstrap_samples=int(parameters.get('hmm_bootstrap_samples', 0)),
+                        random_state=parameters.get('random_state'),
+                    )
+                    hmm_model = SwitchingDiffusionHMM(hmm_cfg)
+                    advanced_outputs['switching_diffusion_hmm'] = hmm_model.fit(tracks_um)
+                except Exception as e:
+                    inference_warnings.append(f'Switching diffusion HMM failed: {str(e)}')
+
+            # Bayesian posterior workflow for uncertainty reporting.
+            if parameters.get('run_bayesian_uncertainty', False):
+                try:
+                    from spt_models import BayesianDiffusionInference, SpotOnConfig
+
+                    frame_interval_s = 1.0 / max(float(fps), 1e-9)
+                    bayes_cfg = SpotOnConfig(
+                        frame_interval_s=frame_interval_s,
+                        axial_detection_range_um=float(parameters.get('axial_detection_range_um', 0.7)),
+                        localization_error_um=float(parameters.get('localization_error_um', 0.03)),
+                        exposure_time_s=float(parameters.get('exposure_time_s', frame_interval_s)),
+                        n_states=int(parameters.get('spot_on_n_states', 2)),
+                        max_lag_frames=int(parameters.get('spot_on_max_lag_frames', min(4, max_lagtime))),
+                        allow_gap_frames=int(memory),
+                        max_jump_um=float(search_range) * float(mpp),
+                        fit_localization_error=bool(parameters.get('spot_on_fit_localization_error', False)),
+                        fit_axial_range=bool(parameters.get('spot_on_fit_axial_range', False)),
+                        random_state=parameters.get('random_state'),
+                    )
+                    bayes = BayesianDiffusionInference(bayes_cfg)
+                    advanced_outputs['bayesian_diffusion_posterior'] = bayes.sample_posterior(
+                        tracks_um,
+                        n_samples=int(parameters.get('bayes_n_samples', 1200)),
+                        burn_in=int(parameters.get('bayes_burn_in', 300)),
+                        thin=int(parameters.get('bayes_thin', 2)),
+                        proposal_scale=float(parameters.get('bayes_proposal_scale', 0.08)),
+                    )
+                except Exception as e:
+                    inference_warnings.append(f'Bayesian posterior inference failed: {str(e)}')
             
             return {
                 'status': 'success',
@@ -358,8 +470,11 @@ class AdvancedAnalysisManager:
                 'trajectories': trajectories,
                 'individual_msds': individual_msds,
                 'ensemble_msd': ensemble_msd,
+                'msd_baseline': msd_baseline,
                 'num_particles': num_particles,
                 'avg_trajectory_length': avg_trajectory_length,
+                'advanced_inference': advanced_outputs,
+                'inference_warnings': inference_warnings,
                 'parameters_used': parameters
             }
             
