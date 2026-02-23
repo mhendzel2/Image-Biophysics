@@ -92,7 +92,9 @@ class ReactionDiffusionModel(FRAPModel):
         bound_pre = state['bound'].copy()
         
         # Apply bleaching
-        bleached_state = self.bleach(state, geometry['bleach_region'])
+        bleach_region = geometry['bleach_region'].copy()
+        bleach_region.setdefault('spacing', spacing)
+        bleached_state = self.bleach(state, bleach_region)
         free = bleached_state['free']
         bound = bleached_state['bound']
         
@@ -191,7 +193,22 @@ class ReactionDiffusionModel(FRAPModel):
             shape = free.shape
             center = bleach_geometry['center']
             radius = bleach_geometry['radius']
-            spacing = bleach_geometry.get('spacing', 1.0)
+            spacing = bleach_geometry.get('spacing', None)
+            if spacing is None:
+                # Infer grid spacing from state shape and center coordinates.
+                # Assumes the center is at the midpoint of the domain, i.e.
+                # center[i] = (shape[i] / 2) * spacing  =>  spacing = 2*center[i]/shape[i].
+                # This is only valid when center coordinates are in physical units and
+                # the centre lies near the grid midpoint.  Pass 'spacing' explicitly
+                # in bleach_geometry to avoid relying on this heuristic.
+                max_center = max(center)
+                if max_center <= 0:
+                    raise ValueError(
+                        "Cannot infer grid spacing: bleach center must have positive "
+                        "coordinates (in physical units). Pass 'spacing' explicitly in "
+                        "bleach_geometry."
+                    )
+                spacing = 2.0 * max_center / max(shape)
             mask = create_circular_bleach_mask(shape, center, radius, spacing)
         elif bleach_geometry['type'] == 'mask':
             mask = bleach_geometry['mask']

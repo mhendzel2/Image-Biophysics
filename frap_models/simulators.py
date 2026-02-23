@@ -161,20 +161,17 @@ class FRAPSimulator:
         num_steps: int,
         boundary: str
     ) -> np.ndarray:
-        """Implicit (Crank-Nicolson) diffusion solver."""
-        ny, nx = state.shape
-        alpha = D * dt / (dx ** 2)
-        
-        # Build sparse matrix for implicit solve
-        # This is a simplified 2D Laplacian
-        # For production, use scipy.sparse for efficiency
-        
+        """Diffusion solver using forward Euler in pixel-unit coordinates.
+
+        The update rule is ``c += dt * D * (sum_neighbors - 4*c)``, which
+        keeps D in units of pixel²/s and is stable when ``D * dt < 0.25``.
+        The :meth:`_compute_laplacian` result (physical, divided by dx²) is
+        multiplied back by dx² so that the spatial normalisation cancels.
+        """
         result = state.copy()
         for _ in range(num_steps):
-            # Simple explicit for now - replace with implicit in production
             laplacian = self._compute_laplacian(result, dx, boundary)
-            result = result + dt * D * laplacian
-        
+            result = result + dt * D * laplacian * (dx ** 2)
         return result
     
     def _integrate_diffusion_explicit(
@@ -186,13 +183,13 @@ class FRAPSimulator:
         num_steps: int,
         boundary: str
     ) -> np.ndarray:
-        """Explicit (forward Euler) diffusion solver."""
+        """Explicit (forward Euler) diffusion solver in pixel-unit coordinates."""
         result = state.copy()
-        
+
         for _ in range(num_steps):
             laplacian = self._compute_laplacian(result, dx, boundary)
-            result = result + dt * D * laplacian
-        
+            result = result + dt * D * laplacian * (dx ** 2)
+
         return result
     
     def _compute_laplacian(
@@ -245,6 +242,11 @@ class FRAPSimulator:
         
         # Use implicit solver for stability
         k_total = k_on + k_off
+
+        # Guard against zero rates (no reaction)
+        if k_total == 0.0:
+            return free.copy(), bound.copy()
+
         exp_term = np.exp(-k_total * dt)
         
         # Analytical solution of coupled ODEs
@@ -265,22 +267,23 @@ class FRAPSimulator:
     ):
         """
         Check Courant condition for diffusion.
-        
-        For stability of explicit methods: D·dt/dx² ≤ 0.25 (2D)
+
+        Since integration uses pixel-unit update ``c += dt*D*(neighbours-4c)``,
+        stability requires ``D*dt < 0.25`` (2-D explicit).
         """
-        courant = D * dt / (dx ** 2)
-        
-        if self.method == 'explicit' and courant > 0.25:
+        courant_pixel = D * dt
+
+        if self.method == 'explicit' and courant_pixel > 0.25:
             warnings.warn(
-                f"Courant number {courant:.4f} exceeds stability limit (0.25) "
+                f"Courant number {courant_pixel:.4f} exceeds stability limit (0.25) "
                 f"for explicit diffusion. Consider reducing dt or using implicit method.",
                 UserWarning
             )
-        
+
         # Report even for implicit
-        if courant > 1.0:
+        if courant_pixel > 1.0:
             warnings.warn(
-                f"Courant number {courant:.4f} is large. "
+                f"Courant number {courant_pixel:.4f} is large. "
                 f"Consider reducing time step for accuracy.",
                 UserWarning
             )
