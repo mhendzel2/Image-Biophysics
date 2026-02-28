@@ -79,6 +79,10 @@ def initialize_session_state():
         st.session_state.image = None
         st.session_state.population_data = None
         st.session_state.report_content = None
+        st.session_state.voxel_size = (1.0, 0.5, 0.5)
+        st.session_state.frame_interval_s = None
+        st.session_state.imaging_metadata = None
+        st.session_state.nb_calibration = {}
 
         # Initialize AI enhancer if available
         if ai_enhancement is not None and hasattr(ai_enhancement, 'AIEnhancementManager'):
@@ -389,6 +393,8 @@ def show_data_loading_page():
                 if load_result['status'] == 'success':
                     st.session_state.image = load_result['image_data']
                     st.session_state.voxel_size = load_result['voxel_size']
+                    st.session_state.frame_interval_s = load_result.get('frame_interval_s')
+                    st.session_state.imaging_metadata = load_result.get('metadata')
                     st.success(f"Channel {selected_channel} loaded successfully!")
                     # Reset dependent states
                     for key in ['enhanced_result', 'segmentation_mask', 'analysis_results', 'population_data', 'report_content']:
@@ -402,6 +408,47 @@ def show_data_loading_page():
                 st.exception(e)
     else:
         st.info("👆 Upload a file to begin")
+
+    if st.session_state.get('image') is not None:
+        st.subheader("Auto-detected Acquisition Metadata (Read-only)")
+        st.caption("Spatial and timing fields are extracted from file headers when available.")
+
+        voxel = st.session_state.get('voxel_size', (1.0, 0.5, 0.5))
+        dt_s = st.session_state.get('frame_interval_s')
+        frame_rate_hz = (1.0 / float(dt_s)) if dt_s and dt_s > 0 else None
+
+        c1, c2, c3, c4 = st.columns(4)
+        with c1:
+            st.text_input("Voxel Z (um)", value=f"{float(voxel[0]):.4f}", disabled=True)
+        with c2:
+            st.text_input("Pixel Y (um)", value=f"{float(voxel[1]):.4f}", disabled=True)
+        with c3:
+            st.text_input("Pixel X (um)", value=f"{float(voxel[2]):.4f}", disabled=True)
+        with c4:
+            dt_label = f"{float(dt_s):.6f}" if dt_s and dt_s > 0 else "n/a"
+            st.text_input("Frame interval (s)", value=dt_label, disabled=True)
+
+        if frame_rate_hz:
+            st.caption(f"Estimated frame rate: {frame_rate_hz:.3f} Hz")
+        else:
+            st.caption("Frame interval not found in metadata. Time-based analyses may require manual expert overrides.")
+
+        with st.expander("Metadata summary"):
+            md = st.session_state.get('imaging_metadata')
+            if isinstance(md, dict):
+                summary = {
+                    "axes": md.get("axes"),
+                    "shape": md.get("shape"),
+                    "channel_count": md.get("channel_count"),
+                    "frame_interval_s": md.get("frame_interval_s"),
+                    "ome_metadata_available": md.get("ome_metadata_available"),
+                    "loader": "Auto-extracted fields shown above",
+                }
+                st.json(summary)
+            elif isinstance(md, str):
+                st.text(md[:2000] + ("..." if len(md) > 2000 else ""))
+            else:
+                st.info("No additional metadata summary available.")
 
 def show_population_analysis_page():
     """Displays the population analysis page with an improved GUI."""
@@ -611,8 +658,15 @@ def show_analysis_page():
         return
 
     st.markdown("Select and configure analysis methods for your data.")
+    render_goal_oriented_wizard(context="main")
+    expert_mode = st.checkbox(
+        "Advanced Settings (For Experts)",
+        value=False,
+        key="main_expert_mode",
+        help="Hide lower-level parameters by default for novice users.",
+    )
 
-    render_analysis_controls()
+    render_analysis_controls(expert_mode=expert_mode)
     render_colocalization_controls()
 
 def show_ai_enhancement_page():
@@ -735,6 +789,210 @@ def _get_display_frame(image: np.ndarray) -> np.ndarray:
     if arr.ndim == 3:
         return arr[arr.shape[0] // 2]
     return np.squeeze(arr)
+
+
+def _recommend_analysis_tool(goal: str, location: str) -> Dict[str, Any]:
+    """Map biology intent to a practical default analysis route."""
+    goal = str(goal)
+    location = str(location)
+
+    if goal == "Protein Mobility":
+        if location == "Membrane":
+            return {
+                "tool": "Segmented FCS",
+                "why": "Segmented FCS is robust for local membrane mobility and temporal changes.",
+                "defaults": {
+                    "main_analysis_tool": "Segmented FCS",
+                    "main_segfcs_model": "2D",
+                    "main_segfcs_window": 5.0,
+                    "main_segfcs_step": 2.5,
+                },
+            }
+        return {
+            "tool": "Number & Brightness",
+            "why": "N&B gives an accessible map of apparent mobility/aggregation from fluctuations.",
+            "defaults": {
+                "main_analysis_tool": "Number & Brightness",
+                "main_nb_window": 1,
+                "main_nb_detrend": "rolling_mean",
+                "main_nb_detrend_window": 15,
+                "main_nb_detector_type": "sCMOS",
+            },
+        }
+
+    if goal == "Protein Clustering":
+        return {
+            "tool": "Image Correlation Spectroscopy",
+            "why": "ICS quantifies clustering and density from spatial correlations.",
+            "defaults": {
+                "main_analysis_tool": "Image Correlation Spectroscopy",
+            },
+        }
+
+    if goal == "Tissue / Nuclear Stiffness":
+        return {
+            "tool": "Material Mechanics",
+            "why": "Material Mechanics provides force/stiffness proxies and boundary mechanics.",
+            "defaults": {
+                "main_analysis_tool": "Material Mechanics",
+                "main_mm_force": True,
+                "main_mm_stiffness": True,
+            },
+        }
+
+    if goal == "Condensate Fusion":
+        return {
+            "tool": "Condensate Lineage Tracking",
+            "why": "Lineage tracking directly quantifies fusion events and relaxation kinetics.",
+            "defaults": {
+                "main_analysis_tool": "Condensate Lineage Tracking",
+                "main_cl_run_fusion": True,
+                "main_cl_run_growth": True,
+            },
+        }
+
+    return {
+        "tool": "Number & Brightness",
+        "why": "Defaulting to N&B as a broad first-pass fluctuation analysis.",
+        "defaults": {"main_analysis_tool": "Number & Brightness"},
+    }
+
+
+def render_goal_oriented_wizard(context: str = "main"):
+    """Simple novice wizard that maps goals to an analysis tool."""
+    st.subheader("Guided Setup")
+    st.caption("Answer two biology-first questions. Technical parameters stay in advanced settings.")
+
+    c1, c2 = st.columns(2)
+    with c1:
+        goal = st.selectbox(
+            "Step 1: What are you trying to measure?",
+            ["Protein Mobility", "Protein Clustering", "Tissue / Nuclear Stiffness", "Condensate Fusion"],
+            key=f"{context}_wizard_goal",
+        )
+    with c2:
+        location = st.selectbox(
+            "Step 2: Where is your target?",
+            ["Cytoplasm", "Membrane", "Nucleus"],
+            key=f"{context}_wizard_location",
+        )
+
+    rec = _recommend_analysis_tool(goal, location)
+    st.info(f"Recommended module: **{rec['tool']}**. {rec['why']}")
+    if st.button("Use Recommended Setup", key=f"{context}_wizard_apply"):
+        for key, value in rec["defaults"].items():
+            st.session_state[key] = value
+        st.success(f"Applied recommendation: {rec['tool']}")
+
+
+def _compute_dark_frame_calibration(uploaded_file) -> Optional[Dict[str, float]]:
+    """Estimate camera offset and read noise from dark-frame stack."""
+    if uploaded_file is None:
+        return None
+    try:
+        import tifffile
+
+        raw = tifffile.imread(io.BytesIO(uploaded_file.getvalue()))
+        arr = np.asarray(raw, dtype=float)
+        if arr.ndim == 2:
+            arr = arr[None, ...]
+        elif arr.ndim > 3:
+            arr = np.reshape(arr, (arr.shape[0], -1))
+        offset_adu = float(np.mean(arr))
+        read_noise_adu = float(np.std(arr))
+        return {
+            "camera_offset_adu": offset_adu,
+            "read_noise_adu": read_noise_adu,
+            "n_dark_frames": int(arr.shape[0]),
+        }
+    except Exception:
+        return None
+
+
+def _evaluate_quality_gate(image: np.ndarray, selected_tool: str) -> Dict[str, Any]:
+    """Traffic-light quality checks before running analysis."""
+    arr = np.asarray(image)
+    checks: List[Dict[str, str]] = []
+    severity = 0  # 0=green, 1=yellow, 2=red
+
+    def add(status: str, title: str, message: str):
+        nonlocal severity
+        checks.append({"status": status, "title": title, "message": message})
+        if status == "red":
+            severity = max(severity, 2)
+        elif status == "yellow":
+            severity = max(severity, 1)
+
+    if not np.all(np.isfinite(arr)):
+        add("red", "Invalid pixels", "Image contains NaN/Inf values that will break model fitting.")
+    else:
+        add("green", "Pixel validity", "No NaN/Inf values detected.")
+
+    finite_vals = arr[np.isfinite(arr)]
+    if finite_vals.size > 0:
+        p1, p99 = np.percentile(finite_vals, [1, 99])
+        p999 = np.percentile(finite_vals, 99.9)
+        max_val = np.max(finite_vals)
+        contrast = float((p99 - p1) / (abs(p99) + 1e-8))
+        if contrast < 0.02:
+            add("yellow", "Dynamic range", "Low contrast can destabilize fluctuation and flow analyses.")
+        else:
+            add("green", "Dynamic range", "Contrast is adequate for most analyses.")
+
+        sat_thresh = 0.995 * max_val if max_val > 0 else p999
+        sat_frac = float(np.mean(finite_vals >= sat_thresh))
+        if sat_frac > 0.05:
+            add("red", "Saturation", f"High saturation ({sat_frac*100:.1f}%). Re-acquire with lower exposure/laser.")
+        elif sat_frac > 0.01:
+            add("yellow", "Saturation", f"Some saturation ({sat_frac*100:.1f}%). Quantitative fits may be biased.")
+        else:
+            add("green", "Saturation", "No major saturation detected.")
+
+    time_series_tools = {
+        "Number & Brightness",
+        "Segmented FCS",
+        "Optical Flow",
+        "Displacement Correlation Spectroscopy",
+        "Condensate Lineage Tracking",
+        "Material Mechanics",
+        "Nuclear Biophysics",
+    }
+    if selected_tool in time_series_tools and arr.ndim != 3:
+        add("red", "Time-series requirement", f"{selected_tool} requires a 3D stack (T, Y, X).")
+    elif arr.ndim == 3:
+        n_frames = int(arr.shape[0])
+        if selected_tool == "Number & Brightness":
+            if n_frames < 30:
+                add("red", "Frame count", "N&B requires at least 30 frames for stable variance estimates.")
+            elif n_frames < 80:
+                add("yellow", "Frame count", "N&B is more reliable with >= 80 frames.")
+            trace = np.mean(arr, axis=(1, 2))
+            mean_trace = float(np.mean(trace))
+            cv = float(np.std(trace) / (mean_trace + 1e-8))
+            if cv < 0.01:
+                add("yellow", "Fluctuation amplitude", "Very weak temporal fluctuations may flatten N&B contrast.")
+        elif selected_tool in {"Optical Flow", "Material Mechanics", "Condensate Lineage Tracking"} and n_frames < 5:
+            add("yellow", "Frame count", "Motion/lineage analyses are more robust with >= 5 frames.")
+        elif selected_tool in {"Deformation Microscopy"} and n_frames < 2:
+            add("red", "Frame count", "Deformation Microscopy requires at least two frames.")
+
+    grade = "green" if severity == 0 else ("yellow" if severity == 1 else "red")
+    return {"grade": grade, "checks": checks}
+
+
+def _render_quality_gate(report: Dict[str, Any]):
+    """Render traffic-light QC summary."""
+    grade = report.get("grade", "green")
+    if grade == "green":
+        st.success("🟢 Quality gate: PASS")
+    elif grade == "yellow":
+        st.warning("🟡 Quality gate: WARN - proceed with caution")
+    else:
+        st.error("🔴 Quality gate: STOP - fix critical data issues before fitting")
+
+    for item in report.get("checks", []):
+        icon = {"green": "🟢", "yellow": "🟡", "red": "🔴"}.get(item["status"], "•")
+        st.caption(f"{icon} {item['title']}: {item['message']}")
 
 def render_colocalization_controls(context='main'):
     """Renders controls for colocalization analysis."""
@@ -869,7 +1127,7 @@ def render_ai_enhancement_controls(context='main'):
         st.caption("Segmentation mask")
         st.image(np.asarray(st.session_state.segmentation_mask), use_container_width=True, clamp=True)
 
-def render_analysis_controls(context='main'):
+def render_analysis_controls(context='main', expert_mode: bool = True):
     """Renders controls for analysis methods."""
     image = st.session_state.get('image')
     if not isinstance(st.session_state.get('analysis_results'), dict):
@@ -878,35 +1136,199 @@ def render_analysis_controls(context='main'):
         st.warning("No image loaded.")
         return
 
-    options = [
-        "Number & Brightness",
-        "Pair Correlation Function",
-        "Segmented FCS",
-        "Optical Flow",
-        "Image Correlation Spectroscopy",
-        "Displacement Correlation Spectroscopy",
-        "Condensate Lineage Tracking",
-        "Material Mechanics",
-        "Deformation Microscopy",
-        "Two-Domain Elastography",
-        "Nuclear Biophysics"
-    ]
+    if expert_mode:
+        options = [
+            "Number & Brightness",
+            "Pair Correlation Function",
+            "Segmented FCS",
+            "Optical Flow",
+            "Image Correlation Spectroscopy",
+            "Displacement Correlation Spectroscopy",
+            "Condensate Lineage Tracking",
+            "Material Mechanics",
+            "Deformation Microscopy",
+            "Two-Domain Elastography",
+            "Nuclear Biophysics",
+        ]
+    else:
+        options = [
+            "Number & Brightness",
+            "Segmented FCS",
+            "Optical Flow",
+            "Image Correlation Spectroscopy",
+            "Condensate Lineage Tracking",
+            "Material Mechanics",
+            "Deformation Microscopy",
+        ]
+
+    preselected = st.session_state.get(f'{context}_analysis_tool')
+    if preselected and preselected not in options:
+        options.insert(0, preselected)
     selected = st.selectbox("Analysis tool", options, key=f'{context}_analysis_tool')
+    qc_report = _evaluate_quality_gate(image, selected)
+    _render_quality_gate(qc_report)
+
+    def quality_gate_allows_run() -> bool:
+        if qc_report.get("grade") == "red":
+            st.error("Quality gate failed. Resolve red issues before running this analysis.")
+            return False
+        return True
 
     result = None
     if selected == "Number & Brightness":
-        window_size = st.slider("Smoothing window", 1, 7, 1, key=f'{context}_nb_window')
+        window_size = st.slider("Spatial smoothing window", 1, 7, 1, key=f'{context}_nb_window')
+        detrend_method = st.selectbox(
+            "Detrending",
+            ["rolling_mean", "global_exponential", "global_polynomial", "none"],
+            index=0,
+            key=f'{context}_nb_detrend',
+            help="Removes slow bleaching/drift trends before fluctuation analysis.",
+        )
+        detrend_kwargs: Dict[str, Any] = {}
+        if detrend_method == "rolling_mean":
+            detrend_kwargs["window"] = int(
+                st.number_input(
+                    "Detrending window (frames)",
+                    min_value=3,
+                    value=15,
+                    step=1,
+                    key=f'{context}_nb_detrend_window',
+                )
+            )
+        elif detrend_method == "global_polynomial":
+            detrend_kwargs["degree"] = int(
+                st.select_slider(
+                    "Detrending polynomial degree",
+                    options=[1, 2, 3, 4, 5],
+                    value=2,
+                    key=f'{context}_nb_detrend_degree',
+                )
+            )
+
+        detector_type = st.selectbox(
+            "Detector type",
+            ["Unknown / PMT / EMCCD", "sCMOS"],
+            index=1,
+            key=f"{context}_nb_detector_type",
+        )
+
+        calibration = st.session_state.get("nb_calibration", {})
+        calibration_mode = st.radio(
+            "Calibration source",
+            ["Manual entry", "Dark-frame stack"],
+            horizontal=True,
+            key=f"{context}_nb_calibration_mode",
+            help="Dark-frame calibration is strongly recommended for sCMOS cameras.",
+        )
+
+        if calibration_mode == "Dark-frame stack":
+            dark_stack = st.file_uploader(
+                "Upload dark-frame stack (.tif/.tiff)",
+                type=["tif", "tiff"],
+                key=f"{context}_nb_dark_stack",
+            )
+            if st.button("Compute dark-frame calibration", key=f"{context}_nb_compute_dark"):
+                cal = _compute_dark_frame_calibration(dark_stack)
+                if cal is None:
+                    st.error("Could not compute calibration from dark-frame stack.")
+                else:
+                    calibration = {
+                        "camera_offset_adu": float(cal["camera_offset_adu"]),
+                        "read_noise_e": float(cal["read_noise_adu"]),
+                        "camera_gain_e_per_adu": 1.0,
+                        "excess_noise_factor": 1.0,
+                        "n_dark_frames": int(cal["n_dark_frames"]),
+                    }
+                    st.session_state.nb_calibration = calibration
+                    st.success(
+                        f"Dark-frame calibration loaded ({calibration['n_dark_frames']} frames): "
+                        f"offset={calibration['camera_offset_adu']:.2f} ADU, read noise={calibration['read_noise_e']:.2f} ADU"
+                    )
+
+        default_offset = float(calibration.get("camera_offset_adu", 0.0))
+        default_gain = float(calibration.get("camera_gain_e_per_adu", 1.0))
+        default_read_noise = float(calibration.get("read_noise_e", 0.0))
+        default_enf = float(calibration.get("excess_noise_factor", 1.0))
+
+        with st.expander("Manual camera calibration parameters", expanded=expert_mode):
+            camera_offset_adu = st.number_input(
+                "Camera offset (ADU)",
+                value=float(default_offset),
+                key=f'{context}_nb_offset',
+            )
+            camera_gain_e_per_adu = st.number_input(
+                "Camera gain (e-/ADU)",
+                min_value=1e-6,
+                value=float(default_gain),
+                format="%.6f",
+                key=f'{context}_nb_gain',
+            )
+            read_noise_e = st.number_input(
+                "Read noise (e- rms)",
+                min_value=0.0,
+                value=float(default_read_noise),
+                format="%.6f",
+                key=f'{context}_nb_read_noise',
+            )
+            excess_noise_factor = st.number_input(
+                "Excess noise factor",
+                min_value=0.1,
+                value=float(default_enf),
+                format="%.6f",
+                key=f'{context}_nb_enf',
+            )
+            block_size_frames = int(
+                st.number_input(
+                    "Uncertainty block size (frames, 0 disables)",
+                    min_value=0,
+                    value=0,
+                    step=1,
+                    key=f"{context}_nb_block_size",
+                )
+            )
+
+        use_roi_mask = st.checkbox(
+            "Use current segmentation mask as ROI",
+            value=st.session_state.get('segmentation_mask') is not None,
+            key=f"{context}_nb_use_roi",
+        )
+
         if st.button("Run N&B", key=f'{context}_run_nb'):
+            if not quality_gate_allows_run():
+                return
             if image.ndim != 3:
                 st.error("N&B requires a 3D stack (time, y, x).")
             elif st.session_state.nb_analyzer is None:
                 st.error("N&B module unavailable.")
             else:
-                result = st.session_state.nb_analyzer.analyze(image, window_size=window_size)
+                if detector_type == "sCMOS":
+                    has_calibration = (camera_offset_adu != 0.0) or (read_noise_e > 0.0)
+                    if not has_calibration:
+                        st.error(
+                            "sCMOS mode requires camera calibration. Provide dark-frame calibration "
+                            "or enter offset/read-noise manually."
+                        )
+                        return
+                roi_mask = st.session_state.get('segmentation_mask') if use_roi_mask else None
+                block_value = int(block_size_frames) if int(block_size_frames) >= 2 else None
+                result = st.session_state.nb_analyzer.analyze(
+                    image,
+                    window_size=window_size,
+                    detrend_method=detrend_method,
+                    detrend_kwargs=detrend_kwargs,
+                    camera_offset_adu=float(camera_offset_adu),
+                    camera_gain_e_per_adu=float(camera_gain_e_per_adu),
+                    read_noise_e=float(read_noise_e),
+                    excess_noise_factor=float(excess_noise_factor),
+                    block_size_frames=block_value,
+                    roi_mask=roi_mask,
+                )
 
     elif selected == "Pair Correlation Function":
         max_radius = st.slider("Max radius", 5, 200, 50, key=f'{context}_pcf_radius')
         if st.button("Run PCF", key=f'{context}_run_pcf'):
+            if not quality_gate_allows_run():
+                return
             if image.ndim == 3:
                 work_image = np.mean(image, axis=0)
             else:
@@ -924,6 +1346,8 @@ def render_analysis_controls(context='main'):
         window_s = st.number_input("Window length (s)", min_value=0.1, value=5.0, key=f'{context}_segfcs_window')
         step_s = st.number_input("Step (s)", min_value=0.1, value=2.5, key=f'{context}_segfcs_step')
         if st.button("Run Segmented FCS", key=f'{context}_run_segfcs'):
+            if not quality_gate_allows_run():
+                return
             analyzer = st.session_state.get('segmented_fcs_analyzer')
             if analyzer is None:
                 st.error("Segmented FCS module unavailable.")
@@ -943,6 +1367,8 @@ def render_analysis_controls(context='main'):
         else:
             method = st.selectbox("Optical flow method", analyzer.get_available_methods(), key=f'{context}_of_method')
             if st.button("Run Optical Flow", key=f'{context}_run_of'):
+                if not quality_gate_allows_run():
+                    return
                 if image.ndim != 3:
                     st.error("Optical flow requires a time sequence (T, Y, X).")
                 else:
@@ -955,10 +1381,14 @@ def render_analysis_controls(context='main'):
         else:
             method = st.selectbox("ICS method", analyzer.get_available_methods(), key=f'{context}_ics_method')
             if st.button("Run ICS", key=f'{context}_run_ics'):
+                if not quality_gate_allows_run():
+                    return
                 result = analyzer.analyze_ics_method(method, image, {})
 
     elif selected == "Displacement Correlation Spectroscopy":
         if st.button("Run DCS", key=f'{context}_run_dcs'):
+            if not quality_gate_allows_run():
+                return
             analyzer = st.session_state.get('dcs_analyzer')
             if analyzer is None:
                 st.error("DCS module unavailable.")
@@ -1053,6 +1483,8 @@ def render_analysis_controls(context='main'):
                 fusion_lookahead = st.slider("Fusion lookahead frames", 5, 40, 20, key=f'{context}_cl_fusion_look')
 
             if st.button("Run Condensate Lineage Tracking", key=f'{context}_run_cl'):
+                if not quality_gate_allows_run():
+                    return
                 if image.ndim != 3:
                     st.error("Condensate lineage tracking requires a time sequence (T, Y, X).")
                 else:
@@ -1138,6 +1570,8 @@ def render_analysis_controls(context='main'):
                 )
 
             if st.button("Run Material Mechanics", key=f'{context}_run_mm'):
+                if not quality_gate_allows_run():
+                    return
                 if image.ndim != 3:
                     st.error("Material mechanics requires a time sequence (T, Y, X).")
                 else:
@@ -1170,6 +1604,8 @@ def render_analysis_controls(context='main'):
 
     elif selected == "Deformation Microscopy":
         if st.button("Run Deformation Microscopy", key=f'{context}_run_dm'):
+            if not quality_gate_allows_run():
+                return
             analyzer = st.session_state.get('dm_analyzer')
             if analyzer is None:
                 st.error("Deformation Microscopy module unavailable.")
@@ -1188,6 +1624,8 @@ def render_analysis_controls(context='main'):
 
     elif selected == "Two-Domain Elastography":
         if st.button("Run Elastography", key=f'{context}_run_elasto'):
+            if not quality_gate_allows_run():
+                return
             analyzer = st.session_state.get('elastography_analyzer')
             dm_result = st.session_state.analysis_results.get("Deformation Microscopy")
             if analyzer is None:
@@ -1216,6 +1654,8 @@ def render_analysis_controls(context='main'):
                 key=f'{context}_nuclear_method'
             )
             if st.button("Run Nuclear Analysis", key=f'{context}_run_nuclear'):
+                if not quality_gate_allows_run():
+                    return
                 if image.ndim != 3:
                     st.error("Nuclear analyses require a time sequence (T, Y, X).")
                 else:

@@ -171,6 +171,39 @@ class TestParameterIdentifiability(unittest.TestCase):
         # Diffusion should have reasonable upper limit
         self.assertLess(bounds['D'][1], 1000)  # Not > 1000 μm²/s
 
+    def test_fit_reports_identifiability_warnings_for_weak_data(self):
+        """Flat recovery data should trigger identifiability diagnostics."""
+        weak_recovery = np.full_like(self.timepoints, 0.75, dtype=float)
+        result = fit_reaction_diffusion(
+            observed_recovery=weak_recovery,
+            timepoints=self.timepoints,
+            geometry=self.geometry,
+            method='minimize',
+            assess_identifiability=True,
+            identifiability_condition_threshold=1e5,
+            identifiability_relative_se_threshold=0.3,
+            identifiability_flat_profile_threshold=0.3,
+            maxiter=40,
+        )
+
+        self.assertIn('identifiability', result)
+        self.assertIn('warnings', result['identifiability'])
+        self.assertIn('identifiable', result['identifiability'])
+        self.assertIsInstance(result.get('identifiability_warning', False), bool)
+
+    def test_fit_can_disable_identifiability_analysis(self):
+        """Optional identifiability diagnostics can be disabled explicitly."""
+        result = fit_reaction_diffusion(
+            observed_recovery=self.true_recovery,
+            timepoints=self.timepoints,
+            geometry=self.geometry,
+            method='minimize',
+            assess_identifiability=False,
+            maxiter=30,
+        )
+        self.assertNotIn('identifiability', result)
+        self.assertNotIn('identifiability_warning', result)
+
 
 class TestMCRDIdentifiability(unittest.TestCase):
     """Test identifiability for mass-conserving RD model."""

@@ -52,7 +52,8 @@ class JointFRAPSPT:
         params: Dict[str, float],
         frap_data: Dict[str, Any],
         spt_data: Dict[str, Any],
-        weights: Dict[str, float] = None
+        weights: Dict[str, float] = None,
+        normalize_by_observation_count: bool = True
     ) -> float:
         """
         Compute joint log-likelihood.
@@ -73,11 +74,45 @@ class JointFRAPSPT:
         log_likelihood : float
             Joint log-likelihood
         """
+        details = self._joint_log_likelihood_components(
+            params=params,
+            frap_data=frap_data,
+            spt_data=spt_data,
+            weights=weights,
+            normalize_by_observation_count=normalize_by_observation_count,
+        )
+        return float(details['joint_log_likelihood'])
+
+    def _joint_log_likelihood_components(
+        self,
+        params: Dict[str, float],
+        frap_data: Dict[str, Any],
+        spt_data: Dict[str, Any],
+        weights: Optional[Dict[str, float]] = None,
+        normalize_by_observation_count: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Compute modality-wise and joint likelihood contributions.
+
+        By default, each modality is normalized by its observation count
+        (mean log-likelihood per observation) before weighting, which prevents
+        high-volume modalities from dominating solely due to sample size.
+        """
         if weights is None:
             weights = {'frap': 1.0, 'spt': 1.0}
-        
-        log_like = 0.0
-        
+        w_frap = float(weights.get('frap', 1.0))
+        w_spt = float(weights.get('spt', 1.0))
+
+        frap_raw = 0.0
+        frap_n = 0
+        frap_norm = 0.0
+
+        spt_raw = 0.0
+        spt_n = 0
+        spt_norm = 0.0
+        spt_log_like_bound = 0.0
+        spt_log_like_unbound = 0.0
+
         # FRAP likelihood
         if 'recovery' in frap_data:
             frap_pred = self.frap_model.simulate(
@@ -85,38 +120,63 @@ class JointFRAPSPT:
                 frap_data['geometry'],
                 frap_data['timepoints']
             )
-            
-            # Gaussian likelihood
-            residuals = frap_data['recovery'] - frap_pred
-            sigma = np.std(residuals, ddof=1)
-            if sigma > 0:
-                frap_log_like = -0.5 * np.sum((residuals / sigma)**2)
-                log_like += weights['frap'] * frap_log_like
-        
+
+            residuals = np.asarray(frap_data['recovery']) - np.asarray(frap_pred)
+            frap_n = int(np.size(residuals))
+            sigma = np.std(residuals, ddof=1) if frap_n > 1 else np.std(residuals)
+            if sigma > 0 and np.isfinite(sigma):
+                frap_raw = float(-0.5 * np.sum((residuals / sigma) ** 2))
+            else:
+                frap_raw = 0.0
+
+        if normalize_by_observation_count:
+            frap_norm = frap_raw / max(frap_n, 1)
+        else:
+            frap_norm = frap_raw
+
         # SPT likelihood (bound dwells)
         if 'bound_dwells' in spt_data and len(spt_data['bound_dwells']) > 0:
-            dwells = spt_data['bound_dwells']
-            k_off = params['k_off']
-            
-            # Exponential likelihood
-            spt_log_like_bound = np.sum(
-                np.log(k_off) - k_off * dwells
-            )
-            log_like += weights['spt'] * spt_log_like_bound
-        
+            dwells = np.asarray(spt_data['bound_dwells'], dtype=float)
+            k_off = max(float(params['k_off']), 1e-12)
+            spt_log_like_bound = float(np.sum(np.log(k_off) - k_off * dwells))
+            spt_raw += spt_log_like_bound
+            spt_n += int(dwells.size)
+
         # SPT likelihood (unbound dwells)
         if 'unbound_dwells' in spt_data and len(spt_data['unbound_dwells']) > 0:
-            dwells = spt_data['unbound_dwells']
-            k_on = params['k_on']
-            concentration = spt_data.get('concentration', 1.0)
-            rate = k_on * concentration
-            
-            spt_log_like_unbound = np.sum(
-                np.log(rate) - rate * dwells
-            )
-            log_like += weights['spt'] * spt_log_like_unbound
-        
-        return log_like
+            dwells = np.asarray(spt_data['unbound_dwells'], dtype=float)
+            k_on = max(float(params['k_on']), 1e-12)
+            concentration = max(float(spt_data.get('concentration', 1.0)), 1e-12)
+            rate = max(k_on * concentration, 1e-12)
+
+            spt_log_like_unbound = float(np.sum(np.log(rate) - rate * dwells))
+            spt_raw += spt_log_like_unbound
+            spt_n += int(dwells.size)
+
+        if normalize_by_observation_count:
+            spt_norm = spt_raw / max(spt_n, 1)
+        else:
+            spt_norm = spt_raw
+
+        joint_log_like = w_frap * frap_norm + w_spt * spt_norm
+
+        return {
+            'joint_log_likelihood': float(joint_log_like),
+            'weights': {'frap': w_frap, 'spt': w_spt},
+            'normalize_by_observation_count': bool(normalize_by_observation_count),
+            'frap': {
+                'raw_log_likelihood': float(frap_raw),
+                'normalized_log_likelihood': float(frap_norm),
+                'n_observations': int(frap_n),
+            },
+            'spt': {
+                'raw_log_likelihood': float(spt_raw),
+                'normalized_log_likelihood': float(spt_norm),
+                'n_observations': int(spt_n),
+                'bound_log_likelihood': float(spt_log_like_bound),
+                'unbound_log_likelihood': float(spt_log_like_unbound),
+            },
+        }
     
     def demonstrate_degeneracy(
         self,
@@ -159,7 +219,8 @@ def fit_joint_model(
     frap_data: Dict[str, Any],
     spt_data: Dict[str, Any],
     initial_guess: Dict[str, float] = None,
-    weights: Dict[str, float] = None
+    weights: Dict[str, float] = None,
+    normalize_by_observation_count: bool = True
 ) -> Dict[str, Any]:
     """
     Fit joint FRAP-SPT model.
@@ -200,7 +261,11 @@ def fit_joint_model(
         }
         
         log_like = joint_model.joint_log_likelihood(
-            params, frap_data, spt_data, weights
+            params,
+            frap_data,
+            spt_data,
+            weights=weights,
+            normalize_by_observation_count=normalize_by_observation_count
         )
         
         return -log_like  # Minimize negative log-likelihood
@@ -235,15 +300,24 @@ def fit_joint_model(
         'bleach_depth': initial_guess.get('bleach_depth', 0.9)
     }
     
-    # Compute log-likelihood
-    log_like = -result.fun
+    # Compute log-likelihood with component diagnostics
+    details = joint_model._joint_log_likelihood_components(
+        params=best_params,
+        frap_data=frap_data,
+        spt_data=spt_data,
+        weights=weights,
+        normalize_by_observation_count=normalize_by_observation_count,
+    )
+    log_like = float(details['joint_log_likelihood'])
     
     return {
         'params': best_params,
         'log_likelihood': log_like,
         'success': result.success,
         'message': 'Joint FRAP-SPT fit complete',
-        'bound_fraction': best_params['k_on'] / (best_params['k_on'] + best_params['k_off'])
+        'bound_fraction': best_params['k_on'] / (best_params['k_on'] + best_params['k_off']),
+        'normalize_by_observation_count': bool(normalize_by_observation_count),
+        'likelihood_components': details
     }
 
 

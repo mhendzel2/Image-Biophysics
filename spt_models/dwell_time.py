@@ -8,7 +8,7 @@ kinetic parameters that appear in FRAP models.
 import numpy as np
 from scipy.optimize import minimize
 from scipy import stats
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Any
 import warnings
 
 
