@@ -77,6 +77,7 @@ def initialize_session_state():
         st.session_state.current_file = None
         st.session_state.processing = False
         st.session_state.image = None
+        st.session_state.image_data = None
         st.session_state.population_data = None
         st.session_state.report_content = None
         st.session_state.voxel_size = (1.0, 0.5, 0.5)
@@ -392,6 +393,7 @@ def show_data_loading_page():
                 
                 if load_result['status'] == 'success':
                     st.session_state.image = load_result['image_data']
+                    st.session_state.image_data = load_result['image_data']
                     st.session_state.voxel_size = load_result['voxel_size']
                     st.session_state.frame_interval_s = load_result.get('frame_interval_s')
                     st.session_state.imaging_metadata = load_result.get('metadata')
@@ -449,6 +451,8 @@ def show_data_loading_page():
                 st.text(md[:2000] + ("..." if len(md) > 2000 else ""))
             else:
                 st.info("No additional metadata summary available.")
+
+    render_image_window(key_prefix="data_loading")
 
 def show_population_analysis_page():
     """Displays the population analysis page with an improved GUI."""
@@ -791,6 +795,41 @@ def _get_display_frame(image: np.ndarray) -> np.ndarray:
     return np.squeeze(arr)
 
 
+def render_image_window(key_prefix: str = "main"):
+    """Render a centered image window for the current input image."""
+    image = st.session_state.get('image')
+    st.subheader("🖼️ Image Window")
+
+    _, center_col, _ = st.columns([1, 3, 1])
+    with center_col:
+        if image is None:
+            st.info("Load data to view images.")
+            return
+
+        arr = np.asarray(image)
+        frame = arr
+        caption = f"Current image | shape={arr.shape}"
+
+        if arr.ndim == 2:
+            frame = arr
+        elif arr.ndim == 3:
+            max_idx = arr.shape[0] - 1
+            idx = st.slider(
+                "Slice",
+                min_value=0,
+                max_value=max_idx,
+                value=max_idx // 2,
+                key=f"{key_prefix}_image_slice",
+            )
+            frame = arr[idx]
+            caption = f"Current image | slice={idx} | shape={arr.shape}"
+        else:
+            frame = _get_display_frame(arr)
+            caption = f"Current image | representative frame | shape={arr.shape}"
+
+        st.image(frame, caption=caption, use_container_width=True, clamp=True)
+
+
 def _recommend_analysis_tool(goal: str, location: str) -> Dict[str, Any]:
     """Map biology intent to a practical default analysis route."""
     goal = str(goal)
@@ -1121,6 +1160,7 @@ def render_ai_enhancement_controls(context='main'):
             st.image(_get_display_frame(result['enhanced_image']), use_container_width=True, clamp=True)
         if st.button("Use enhanced image as current input", key=f'{context}_use_enhanced'):
             st.session_state.image = np.asarray(result['enhanced_image'])
+            st.session_state.image_data = st.session_state.image
             st.success("Current image replaced with enhanced image.")
 
     if st.session_state.get('segmentation_mask') is not None:

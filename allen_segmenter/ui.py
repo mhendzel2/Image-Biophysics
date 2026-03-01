@@ -16,9 +16,27 @@ def show_allen_segmenter_page():
     for 3D intracellular structure segmentation.
     """)
 
-    if 'image_data' not in st.session_state or st.session_state.image_data is None:
+    image = st.session_state.get('image_data')
+    if image is None:
+        image = st.session_state.get('image')
+
+    if image is None:
         st.warning("Please load an image in the 'Data Loading' tab first.")
         return
+
+    image_np = np.asarray(image)
+
+    st.subheader("🖼️ Input Image")
+    _, image_col, _ = st.columns([1, 3, 1])
+    with image_col:
+        arr = image_np
+        if arr.ndim == 2:
+            st.image(arr, caption=f"Current image | shape={arr.shape}", clamp=True, use_container_width=True)
+        elif arr.ndim == 3:
+            z_idx = st.slider("Slice", 0, arr.shape[0] - 1, arr.shape[0] // 2, key="allen_input_slice")
+            st.image(arr[z_idx], caption=f"Current image | slice={z_idx} | shape={arr.shape}", clamp=True, use_container_width=True)
+        else:
+            st.image(np.squeeze(arr), caption=f"Current image | shape={arr.shape}", clamp=True, use_container_width=True)
 
     # Backend Selection
     backend_mode = st.radio(
@@ -76,11 +94,16 @@ def show_allen_segmenter_page():
                 # Get image from session state
                 # Assuming st.session_state.image_data is the numpy array
                 # We might need to handle different dimensions here or in the backend
-                image = st.session_state.image_data
+                image = st.session_state.get('image_data')
+                if image is None:
+                    image = st.session_state.get('image')
+                if image is None:
+                    raise ValueError("No image available for segmentation.")
+                image_np = np.asarray(image)
                 
                 # Run
                 mask = backend.segment(
-                    image, 
+                    image_np,
                     structure_id=selected_structure, 
                     config=config
                 )
@@ -99,7 +122,13 @@ def show_allen_segmenter_page():
         st.subheader("Results")
         
         mask = st.session_state['segmentation_result']
-        image = st.session_state.image_data
+        image = st.session_state.get('image_data')
+        if image is None:
+            image = st.session_state.get('image')
+        if image is None:
+            st.warning("No source image found for visualization.")
+            return
+        image_np = np.asarray(image)
         
         # Simple visualization: Middle slice
         if mask.ndim == 3:
@@ -107,7 +136,7 @@ def show_allen_segmenter_page():
             
             col1, col2 = st.columns(2)
             with col1:
-                st.image(image[z_mid], caption="Original (Middle Slice)", clamp=True, use_column_width=True)
+                st.image(image_np[z_mid], caption="Original (Middle Slice)", clamp=True, use_column_width=True)
             with col2:
                 st.image(mask[z_mid].astype(float), caption="Segmentation Mask", clamp=True, use_column_width=True)
                 
