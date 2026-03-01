@@ -1,6 +1,7 @@
 numpy
 scipy
 scikit-image
+PyWavelets
 pandas
 streamlit
 torch

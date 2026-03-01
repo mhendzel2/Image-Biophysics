@@ -19,6 +19,7 @@ dependencies = [
     "readlif>=0.6.5",
     "scikit-image>=0.25.2",
     "scipy>=1.15.3",
+    "pywavelets>=1.8.0",
     "setuptools>=80.9.0",
     "streamlit>=1.45.1",
     "tifffile>=2025.6.11",
